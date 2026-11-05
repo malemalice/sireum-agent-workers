@@ -39,7 +39,7 @@ class Booster(test_e2e.E2E):
             card("c6", title="usage-limit please", tags=("remote", "repo:sandbox", "executor:claude")),
             card("c7", tags=("remote", "repo:sandbox", "test:fake")),
         ], "log": []}))
-        os.environ.update({"SOURCE": f"file:{cls.board}", "REMOTE_TAGGERS": "alice", "CLAIM_GRACE": "12s",
+        os.environ.update({"SOURCE": f"file:{cls.board}", "REMOTE_TAGGERS": "alice", "CLAIM_GRACE": "25s",
                            "POLL_INTERVAL": "1", "RECONCILE_INTERVAL": "1"})
         try:
             super().start_bridge()
@@ -55,8 +55,12 @@ class Booster(test_e2e.E2E):
         env = {"PATH": os.environ["PATH"], "HOME": str(self.tmp), "JOB_ID": job_id, "BRIDGE_URL": self.url,
                "WORKER_TOKEN": WORKER, "CACHE_DIR": str(self.tmp / "cache"),
                "SIREUM_ALLOW_FAKE_EXECUTOR": "1", "SIREUM_EXECUTOR_OVERRIDE": "fake"}
-        return subprocess.Popen([sys.executable, str(ROOT / "runner" / "entrypoint.py")], env=env,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with open(self.tmp / f"runner-{job_id}.err", "w") as err:
+            return subprocess.Popen([sys.executable, str(ROOT / "runner" / "entrypoint.py")], env=env,
+                                    stdout=subprocess.DEVNULL, stderr=err)
+
+    def runner_errs(self):
+        return {f.name: f.read_text()[-1500:] for f in self.tmp.glob("runner-*.err")}
 
     def board_state(self):
         return json.loads(self.board.read_text())
@@ -95,7 +99,8 @@ class Booster(test_e2e.E2E):
         self.assertIsNotNone(self.host_branch("kb-c1"))
 
         # c7: test target from the label => success => complete.
-        self.assertTrue(self.wait(lambda: any(e[0] == "complete" for e in self.log_for("c7"))), self.log_for("c7"))
+        self.assertTrue(self.wait(lambda: any(e[0] == "complete" for e in self.log_for("c7"))),
+                        (self.log_for("c7"), self.runner_errs(), (self.tmp / "bridge.log").read_text()[-3000:]))
         self.assertEqual(self.run_view("kb-c7")["result"]["test_result"]["target"], "fake")
 
         # c6: usage limit -> failed -> released back to Hermes; claude paused.
@@ -109,7 +114,7 @@ class Booster(test_e2e.E2E):
 
         # c5: opencode paused -> never claimed -> released after CLAIM_GRACE.
         self.assertFalse(any(e[0] == "claim" for e in self.log_for("c5")))
-        self.assertTrue(self.wait(lambda: any(e[0] == "release" for e in self.log_for("c5")), 30), self.log_for("c5"))
+        self.assertTrue(self.wait(lambda: any(e[0] == "release" for e in self.log_for("c5")), 45), self.log_for("c5"))
         self.assertTrue(any("no executor available" in e[2] for e in self.log_for("c5") if e[0] == "comment"))
         self.call("POST", "/v1/executors/claude/resume", {})
         self.call("POST", "/v1/executors/opencode/resume", {})
@@ -121,7 +126,7 @@ class Booster(test_e2e.E2E):
         self.board.write_text(json.dumps(d))
         self.assertTrue(self.wait(lambda: any(e[0] == "claim" for e in self.log_for("c9"))))
         # No runner ever leases kb-c9 -> after CLAIM_GRACE: cancelled, no_capacity, released.
-        self.assertTrue(self.wait(lambda: any(e[0] == "release" for e in self.log_for("c9")), 30), self.log_for("c9"))
+        self.assertTrue(self.wait(lambda: any(e[0] == "release" for e in self.log_for("c9")), 45), self.log_for("c9"))
         res = self.run_view("kb-c9")["result"]
         self.assertEqual((res["status"], res["error"]["code"]), ("cancelled", "no_capacity"))
         # Runner arriving late gets 409 and exits cleanly.

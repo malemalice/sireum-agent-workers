@@ -104,6 +104,8 @@ class Bridge(AccessOps):
         self.relay = Relay(state_dir, self.hosts, int(env.get("BUNDLE_MAX_MB", "50")), Resolver())
         self.access = AccessStore(self.store)
         self.pkg = PkgRelay(self.relay.creds)
+        from .mcp import Tools
+        self.mcp = Tools(self)
         self.runs_dir = state_dir / "runs"
         self.runs_dir.mkdir(exist_ok=True)
 
@@ -575,6 +577,10 @@ class Handler(BaseHTTPRequestHandler):
                 if self._authz(b.operator_token):
                     self._send(200, {"pending": b.list_requests()})
                 return
+            if path == "/v1/actions":
+                if self._authz(b.operator_token):
+                    self._send(200, {"pending": b.mcp.clients.actions()})
+                return
             if m := re.fullmatch(r"/v1/jobs/([^/]+)", path):
                 if self._authz(b.worker_token):
                     self._send(*b.lease_job(m[1]))
@@ -644,6 +650,15 @@ class Handler(BaseHTTPRequestHandler):
                         self._send(*b.grant(int(m[1]), body))
                     else:
                         self._send(*b.deny(int(m[1]), str(body.get("note") or "no reason given")))
+                return
+            if m := re.fullmatch(r"/v1/actions/([A-Za-z0-9]{8})/(done|reject)", path):
+                if self._authz(b.operator_token):
+                    body = self._json() or {}
+                    ok = b.mcp.clients.close(m[1], "done" if m[2] == "done" else "rejected",
+                                             str(body.get("result") or ""))
+                    if ok and m[2] == "reject":
+                        b.discord(f"Sireum: proposal {m[1].upper()} rejected by the operator.")
+                    self._send(200 if ok else 404, {"closed": ok})
                 return
             if m := re.fullmatch(r"/v1/jobs/([^/]+)/rerun", path):
                 if self._authz(b.operator_token):
@@ -803,6 +818,14 @@ def main(argv: list[str] | None = None) -> None:
     if bridge.booster:
         loop(bridge.booster.tick, bridge.poll_interval, "booster")
     loop(bridge.daily_check, int(os.environ.get("DOCTOR_INTERVAL", str(24 * 3600))), "doctor")
+    # MCP: a separate listener that serves only /mcp (publish it with Tailscale Funnel).
+    mcp_listen = os.environ.get("MCP_LISTEN", "127.0.0.1:8790")
+    if mcp_listen.lower() not in ("off", "0", "false", ""):
+        from .mcp import make_handler
+        mh, _, mp = mcp_listen.rpartition(":")
+        msrv = ThreadingHTTPServer((mh or "127.0.0.1", int(mp)), make_handler(bridge.mcp))
+        threading.Thread(target=msrv.serve_forever, daemon=True, name="mcp").start()
+        log.info("MCP listening on %s (only /mcp)", mcp_listen)
     host, _, port = args.listen.rpartition(":")
     srv = ThreadingHTTPServer((host or "0.0.0.0", int(port)), Handler)
     log.info("listening on %s (repos: %s)", args.listen, ", ".join(r.alias for r in bridge.repos if r.enabled))

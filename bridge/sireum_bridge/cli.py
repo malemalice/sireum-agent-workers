@@ -13,6 +13,9 @@
   sireum-hub registry add NAME --ecosystem npm|pypi|go|generic --url URL [--scope S]… [--mode relay|inject]
                       [--auth …] | registry list
   sireum-hub secrets | doctor | revoke REPO secret|registry|egress NAME
+  sireum-hub mcp-client add NAME --tier read|operate | mcp-client list | mcp-client revoke NAME
+  sireum-hub mcp funnel on|off|status
+  sireum-hub actions | confirm CODE [--source …|--value-file F] [--expose …] | reject CODE
 """
 from __future__ import annotations
 
@@ -27,9 +30,9 @@ from .nodes import Nodes
 from .store import Store
 
 COMMANDS = ("invite", "nodes", "add-repo", "repos", "connect-hermes", "runner-image", "needs", "grant", "deny",
-            "rerun", "registry", "secrets", "doctor", "revoke")
+            "rerun", "registry", "secrets", "doctor", "revoke", "mcp-client", "mcp", "actions", "confirm", "reject")
 ADMIN = ("add-repo", "repos", "connect-hermes", "runner-image", "needs", "grant", "deny", "rerun", "registry",
-         "secrets", "doctor", "revoke")
+         "secrets", "doctor", "revoke", "mcp-client", "mcp", "actions", "confirm", "reject")
 
 
 def _nodes(state: Path) -> Nodes:
@@ -124,6 +127,26 @@ def main(argv: list[str] | None = None) -> None:
     rv.add_argument("repo")
     rv.add_argument("kind", choices=("secret", "registry", "egress"))
     rv.add_argument("name")
+    mc = sub.add_parser("mcp-client", help="MCP clients (e.g. Hermes)")
+    mcs = mc.add_subparsers(dest="mcp_cmd", required=True)
+    mca = mcs.add_parser("add")
+    mca.add_argument("name")
+    mca.add_argument("--tier", choices=("read", "operate"), default="read")
+    mcs.add_parser("list")
+    mcr = mcs.add_parser("revoke")
+    mcr.add_argument("name")
+    mf = sub.add_parser("mcp", help="publish the MCP endpoint")
+    mfs = mf.add_subparsers(dest="mcp_sub", required=True)
+    mff = mfs.add_parser("funnel", help="Tailscale Funnel for /mcp only")
+    mff.add_argument("state_arg", choices=("on", "off", "status"))
+    sub.add_parser("actions", help="sensitive actions proposed via MCP, waiting for you")
+    cf = sub.add_parser("confirm", help="carry out a proposed action")
+    cf.add_argument("code")
+    cf.add_argument("--source")
+    cf.add_argument("--value-file")
+    cf.add_argument("--expose", choices=("prepare", "test", "agent"))
+    rj = sub.add_parser("reject", help="refuse a proposed action")
+    rj.add_argument("code")
     args = ap.parse_args(argv)
 
     if args.cmd in ADMIN:
@@ -135,8 +158,14 @@ def main(argv: list[str] | None = None) -> None:
             fn = {"add-repo": admin.add_repo, "repos": admin.list_repos, "connect-hermes": admin.connect_hermes,
                   "runner-image": admin.runner_image, "needs": admin.needs, "grant": admin.grant,
                   "deny": admin.deny, "rerun": admin.rerun, "secrets": admin.secrets_inventory,
-                  "doctor": admin.doctor, "revoke": admin.revoke}[args.cmd]
-        raise SystemExit(fn(ctx, args))
+                  "doctor": admin.doctor, "revoke": admin.revoke, "mcp-client": admin.mcp_client,
+                  "mcp": admin.mcp_funnel, "actions": admin.actions, "confirm": admin.confirm,
+                  "reject": admin.reject}[args.cmd]
+        try:
+            rc = fn(ctx, args)
+        finally:
+            _fix_state_owner(args.state)
+        raise SystemExit(rc)
 
     nodes = _nodes(args.state)
     try:

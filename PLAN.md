@@ -220,6 +220,7 @@ git host; nothing has run on real hardware yet.
 | `sireum-kanban` forced command | ✓ | against a fake `hermes` CLI | **match the command templates to the real CLI** |
 | Enrollment: `sireum-hub invite`, enroll / seats / leave | ✓ | tests (no Tailscale/Nomad) | Tailscale OAuth key minting, Nomad Variables |
 | Hub installer (`hub/install-hub.sh`), Nomad server + ACL policies, crons | ✓ | syntax only | run on the hub PC |
+| Phase 7: hub MCP (separate /mcp listener, read/operate tiers, propose→confirm, lockout) | ✓ | 6 tests over real HTTP | Funnel on; Hermes as the client |
 | Phase 6: access requests, per-phase secrets, package relay (npm/PyPI/Go), egress sync, services, hub signing, doctor | ✓ | 9 tests (fake registry, signed-commit verify) + Docker smoke 13/13 | a real private registry; GitHub App commits not built |
 | Phase 1.5: add-repo, connect-hermes, worker-built image, invites without Tailscale OAuth | ✓ | 10 tests (fake GitHub API, dry-run SSH) | real GitHub, hermes-host, a worker build |
 | Native macOS hub (`hub/install-hub-macos.sh`) + GHCR pull auth | ✓ | bash 3.2 syntax, launchd plists lint, bridge + enrol on macOS Python 3.9, 27 tests on 3.9 and 3.13 | run on the hub Mac; GHCR package + tokens |
@@ -334,7 +335,7 @@ never hits the public registry; a secret with `prepare` exposure is absent durin
 agent phase; a job missing a secret ends `needs_access`, `grant` re-runs it to success;
 `doctor` flags an expired token; audit shows granted names only.
 
-### Phase 7 — hub MCP for Hermes (via Tailscale Funnel)
+### Phase 7 — hub MCP for Hermes (via Tailscale Funnel) (built 2026-11-05)
 Goal: Hermes (or any MCP client) helps operate the hub. Nothing is installed on
 `hermes-host`; the MCP server runs in the bridge on the hub.
 
@@ -363,6 +364,11 @@ Goal: Hermes (or any MCP client) helps operate the hub. Nothing is installed on
   pending action; confirm executes it; no secret value appears in any MCP response or log.
 - To check first: Hermes supports remote MCP servers over HTTP; Funnel caller-IP header;
   Funnel is beta with unpublished bandwidth limits (MCP traffic is small).
+- Built: `bridge/sireum_bridge/mcp.py` (listener, tools, tiers, limiter, pending actions),
+  CLI `mcp-client add|list|revoke`, `mcp funnel on|off|status`, `actions`, `confirm`,
+  `reject`; Nomad drain via the bridge token (policy now has `node` write); `docs/mcp.md`.
+  Confirmation is CLI-only (no Discord button). Tests: `tests/test_phase7.py` (6).
+  **Funnel is not switched on** — the operator runs `sireum-hub mcp funnel on`.
 
 ### Phase 5 — hardening / optional
 - gVisor, OSV scan, private npm/PyPI mirror, `:python`/`:node`, GPU node class.

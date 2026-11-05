@@ -70,7 +70,8 @@ class E2E(unittest.TestCase):
     @classmethod
     def start_bridge(cls):
         env = {**os.environ, "WORKER_TOKEN": WORKER, "OPERATOR_TOKEN": OPERATOR,
-               "BRIDGE_PUBLIC_URL": cls.url, "LEASE_TTL_SEC": "6", "PYTHONPATH": str(ROOT / "bridge")}
+               "BRIDGE_PUBLIC_URL": cls.url, "LEASE_TTL_SEC": "6", "PYTHONPATH": str(ROOT / "bridge"),
+               "MCP_LISTEN": getattr(cls, "MCP_LISTEN", "off"), **getattr(cls, "EXTRA_ENV", {})}
         cls.bridge_log = open(cls.tmp / "bridge.log", "a")
         cls.bridge = subprocess.Popen(
             [sys.executable, "-m", "sireum_bridge", "--config", str(cls.cfg), "--state", str(cls.state),

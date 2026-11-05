@@ -788,9 +788,14 @@ def run_job(job_id: str) -> int:
                 pass
         post_result(result, bundle_path)
         if mirror.exists():
-            git("worktree", "remove", "--force", str(wt), cwd=mirror, check=False)
-            git("worktree", "prune", cwd=mirror, check=False)
-            git("branch", "-D", branch, cwd=mirror, check=False)
+            # Same per-repo lock as setup: another job may be adding a worktree to this mirror.
+            fcntl.flock(lock_f, fcntl.LOCK_EX)
+            try:
+                git("worktree", "remove", "--force", str(wt), cwd=mirror, check=False)
+                git("worktree", "prune", cwd=mirror, check=False)
+                git("branch", "-D", branch, cwd=mirror, check=False)
+            finally:
+                fcntl.flock(lock_f, fcntl.LOCK_UN)
         shutil.rmtree(wt, ignore_errors=True)
         shutil.rmtree(job_home, ignore_errors=True)
         lock_f.close()

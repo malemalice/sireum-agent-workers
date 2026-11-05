@@ -72,6 +72,22 @@ class Nomad:
                   {"Name": name, "Type": "client", "Policies": policies}, self._h())
         return r["AccessorID"], r["SecretID"]
 
+    def nodes(self) -> list[dict]:
+        return _call("GET", f"{self.addr}/v1/nodes", None, self._h()) or []
+
+    def node_id(self, name: str) -> str:
+        for n in self.nodes():
+            if n.get("Name") == name:
+                return n["ID"]
+        raise APIError(f"no Nomad node named {name}", 404)
+
+    def drain(self, name: str, deadline_sec: int | None) -> None:
+        """deadline_sec=None ⇒ stop draining and mark eligible again."""
+        nid = self.node_id(name)
+        spec = ({"DrainSpec": {"Deadline": int(deadline_sec * 1e9), "IgnoreSystemJobs": False}, "MarkEligible": False}
+                if deadline_sec is not None else {"DrainSpec": None, "MarkEligible": True})
+        _call("POST", f"{self.addr}/v1/node/{nid}/drain", spec, self._h())
+
     def acl_token_delete(self, accessor: str) -> None:
         try:
             _call("DELETE", f"{self.addr}/v1/acl/token/{accessor}", None, self._h())

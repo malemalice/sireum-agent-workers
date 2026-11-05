@@ -17,6 +17,10 @@
 | `cli.py` | `sireum-hub serve | invite | nodes | add-repo | repos | connect-hermes | runner-image` |
 | `admin.py` | Config-editing commands (`add-repo`, `connect-hermes`), env-file updates, bridge restart |
 | `creds.py` | Credential sources: file / env / command / GitHub App, cached, hot-reloaded |
+| `mcp.py` | MCP server on its own listener (`/mcp` only): tools by tier, proposals, limiter |
+| `access.py` / `accessops.py` | Requests vs approvals, access requests, grants, re-runs, egress list |
+| `pkgrelay.py` | Private registry relay (npm / PyPI / Go) and inject mode |
+| `maintenance.py` | Credential inventory and `doctor` |
 | `runnersrc.py` | Runner image tag from source hash; source tarball for workers to build |
 
 Extra env beyond the table below: `SOURCE` (`kanban-ssh:user@host#keyfile`,

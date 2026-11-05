@@ -17,6 +17,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -525,4 +526,103 @@ def revoke(ctx: Ctx, args) -> int:
     entry[key] = cur
     save_yaml(ctx, "repos.yaml", doc)
     print(f"revoked {args.kind} {args.name} from repo:{args.repo} (applies to the next job)")
+    return 0
+
+
+# -- Phase 7: MCP clients, proposals, Funnel ---------------------------------------
+
+def _clients(args):
+    from .mcp import ClientStore
+    from .store import Store
+    return ClientStore(Store(str(Path(args.state) / "state.db")))
+
+
+def mcp_client(ctx: Ctx, args) -> int:
+    cs = _clients(args)
+    if args.mcp_cmd == "add":
+        tok = cs.add(args.name, args.tier)
+        print(tok)
+        print(f"\nMCP client {args.name} ({args.tier}). This token is shown once; give it to the client as\n"
+              f"  Authorization: Bearer <token>\nEndpoint: https://<hub>.ts.net:8443/mcp (after `sireum-hub mcp funnel on`)",
+              file=sys.stderr)
+    elif args.mcp_cmd == "list":
+        for c in cs.list():
+            print(f"{c['name']:<16} {c['tier']:<8} {'REVOKED' if c['revoked'] else 'active'}")
+    elif args.mcp_cmd == "revoke":
+        print("revoked" if cs.revoke(args.name) else f"no client {args.name}")
+    return 0
+
+
+def mcp_funnel(ctx: Ctx, args) -> int:
+    port = os.environ.get("MCP_FUNNEL_PORT", "8443")
+    listen = os.environ.get("MCP_LISTEN", "127.0.0.1:8790")
+    if args.state_arg == "on":
+        argv = ["tailscale", "funnel", "--bg", f"--https={port}", f"http://{listen}"]
+        print("This makes ONLY the MCP endpoint reachable from the public internet (token required).")
+    elif args.state_arg == "off":
+        argv = ["tailscale", "funnel", f"--https={port}", "off"]
+    else:
+        argv = ["tailscale", "funnel", "status"]
+    try:
+        ctx.run(argv, user=ctx.operator)
+    except (subprocess.CalledProcessError, OSError) as e:
+        print(f"failed: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def actions(ctx: Ctx, args) -> int:
+    code, r = bridge_api("GET", "/v1/actions")
+    pend = r.get("pending", [])
+    if not pend:
+        print("No pending proposals.")
+    for a in pend:
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(a["created_at"]))
+        print(f"{a['code']}  {a['summary']}   (from {a['client']}, {when})")
+    return 0
+
+
+def confirm(ctx: Ctx, args) -> int:
+    """Execute a proposed action here, as the operator, then mark it done."""
+    from argparse import Namespace
+    code, r = bridge_api("GET", "/v1/actions")
+    act = next((a for a in r.get("pending", []) if a["code"] == args.code.upper()), None)
+    if not act:
+        raise SystemExit(f"no pending proposal {args.code} (see: sireum-hub actions)")
+    p = act["params"]
+    print(f"Confirming: {act['summary']} (proposed by {act['client']})", file=sys.stderr)
+    kind = act["action"]
+    if kind == "grant":
+        rc = grant(ctx, Namespace(id=p["id"], source=args.source, value_file=args.value_file,
+                                  expose=args.expose or p.get("expose")))
+    elif kind == "deny":
+        rc = deny(ctx, Namespace(id=p["id"], note=p["note"]))
+    elif kind == "add_repo":
+        rc = add_repo(ctx, Namespace(repo=p["repo"], alias=p.get("alias"), host="github",
+                                     api_url=os.environ.get("SIREUM_GITHUB_API", "https://api.github.com"),
+                                     git_url=None, auth=None, per_repo=False, branch=None, protect=False,
+                                     no_protect=False, allow_unprotected=False))
+    elif kind == "invite":
+        from .cli import _nodes
+        print(_nodes(Path(args.state)).invite(p["name"]))
+        print("Join code above — send it privately; it was not shared with the MCP client.", file=sys.stderr)
+        rc = 0
+    elif kind == "revoke":
+        rc = revoke(ctx, Namespace(repo=p["repo"], kind=p["kind"], name=p["name"]))
+    elif kind == "remove_node":
+        c, resp = bridge_api("DELETE", f"/v1/nodes/{p['node']}")
+        if c != 200:
+            raise SystemExit(f"remove failed: {resp.get('error')}")
+        print(f"removed {p['node']}")
+        rc = 0
+    else:
+        raise SystemExit(f"unknown action {kind}")
+    if rc == 0:
+        bridge_api("POST", f"/v1/actions/{act['code']}/done", {"result": "confirmed by the operator"})
+    return rc
+
+
+def reject(ctx: Ctx, args) -> int:
+    code, r = bridge_api("POST", f"/v1/actions/{args.code.upper()}/reject", {})
+    print("rejected" if r.get("closed") else f"no pending proposal {args.code}")
     return 0

@@ -416,4 +416,5 @@ More: [`docs/operations.md`](docs/operations.md) §9.
 | [`hub/`](hub/) | Hub installer, Nomad server config + ACL policies, bridge service, crons |
 | [`kanban/`](kanban/) | `sireum-kanban` forced-command wrapper + installer for `hermes-host` |
 | [`scripts/`](scripts/) | `phase0-smoke.sh` (one-machine Docker test), `build-images.sh` (multi-arch) |
+| [`docs/mcp.md`](docs/mcp.md) | Hub MCP for Hermes: setup, tools, propose → confirm, safety |
 | [`tests/`](tests/) | `python3 -m unittest discover -s tests` — bridge + runner + sources, no network |

@@ -63,7 +63,7 @@ EOF
 if curl -s -m 2 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
   echo "port $PORT is already in use (a real hub?) — set PORT=<free port>" >&2; exit 1
 fi
-WORKER_TOKEN=$WORKER_TOKEN OPERATOR_TOKEN=$OPERATOR_TOKEN BRIDGE_PUBLIC_URL="http://$HUB_HOST:$PORT" \
+MCP_LISTEN=off WORKER_TOKEN=$WORKER_TOKEN OPERATOR_TOKEN=$OPERATOR_TOKEN BRIDGE_PUBLIC_URL="http://$HUB_HOST:$PORT" \
 PYTHONPATH="$ROOT/bridge" python3 -m sireum_bridge --config "$WORK/config" --state "$WORK/state" \
   --listen "127.0.0.1:$PORT" >"$WORK/bridge.log" 2>&1 &
 BRIDGE_PID=$!

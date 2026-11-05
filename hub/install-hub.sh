@@ -137,6 +137,8 @@ Next:
   sudo sireum-hub add-repo owner/repo                          # per repo (uses your gh login)
   sudo sireum-hub connect-hermes you@hermes-host --taggers a,b # once
   sudo sireum-hub invite --name <pc>                           # per worker PC
+  sudo sireum-hub mcp-client add hermes --tier operate         # MCP for Hermes (token shown once)
+  sudo sireum-hub mcp funnel on                                # publish ONLY /mcp at https://$TS_NAME:8443/mcp
 Optional, later: Tailscale ACL (tag:sireum-worker -> $TS_NAME:443,4647), OFFSITE backups in $ENV_FILE.
 Operator token for /status and /v1/dispatch: grep OPERATOR_TOKEN $ENV_FILE
 EOF

@@ -239,6 +239,8 @@ Next:
   sireum-hub add-repo owner/repo                          # per repo (uses your gh login)
   sireum-hub connect-hermes you@hermes-host --taggers a,b # once
   sireum-hub invite --name <pc>                           # per worker PC
+  sireum-hub mcp-client add hermes --tier operate         # MCP for Hermes (token shown once)
+  sireum-hub mcp funnel on                                # publish ONLY /mcp at https://$TS_NAME:8443/mcp
 Optional, later: Tailscale ACL (tag:sireum-worker -> $TS_NAME:443,4647), OFFSITE backups in
 $ENV_FILE, sudo pmset -c sleep 0 (keep the Mac awake on power).
 Uninstall: sireum-hub-uninstall [--purge]
