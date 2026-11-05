@@ -2,8 +2,10 @@
 
 > *sireum* (Sundanese: ant) — many small workers carrying tasks together.
 >
-> **Status:** design complete (rev 3), **not implemented yet**. Commands and
-> endpoints below are the planned interface; see `PLAN.md` for phases.
+> **Status:** code complete for Phases 0, 1 and 3 plus the GitHub Issues source.
+> It is tested locally with a fake executor (`tests/`, `scripts/phase0-smoke.sh`) but
+> **not yet run on real hardware or against Hermes**. The `hermes kanban` commands in
+> `kanban/sireum-kanban` still have to be checked. See `PLAN.md` §11 for what's verified.
 > **Owner:** Adaptiv · **Date:** 2026-11-05 (WIB)
 
 Sireum is an optional **booster** for the Hermes kanban. A card tagged `remote`
@@ -310,7 +312,15 @@ environment per OS, Docker Engine, Tailscale, Nomad, `client-bootstrap.sh`, and
 
 The hub is one always-on PC (which one is **tentative**). It runs the Nomad
 server, `sireum-bridge` with the git relay, and an image registry, all reachable
-only over Tailscale. See [`docs/operations.md`](docs/operations.md) §1.
+only over Tailscale. On an Ubuntu/Debian PC that is already on the tailnet:
+
+```bash
+sudo ./hub/install-hub.sh          # Nomad server + ACLs, registry, bridge, crons
+REGISTRY=<hub>.ts.net:5000 scripts/build-images.sh   # push the runner images
+```
+
+The installer prints the remaining manual steps (git host keys, kanban key, Tailscale ACL).
+See [`docs/operations.md`](docs/operations.md) §1.
 
 To invite a PC:
 
@@ -375,3 +385,7 @@ More: [`docs/operations.md`](docs/operations.md) §9.
 | [`runner/README.md`](runner/README.md) | Runner algorithm and executor adapters |
 | [`nomad/`](nomad/) | Job spec, client bootstrap, egress allowlist |
 | [`install/`](install/) | One-command worker installers and the `sireum` helper |
+| [`hub/`](hub/) | Hub installer, Nomad server config + ACL policies, bridge service, crons |
+| [`kanban/`](kanban/) | `sireum-kanban` forced-command wrapper + installer for `hermes-host` |
+| [`scripts/`](scripts/) | `phase0-smoke.sh` (one-machine Docker test), `build-images.sh` (multi-arch) |
+| [`tests/`](tests/) | `python3 -m unittest discover -s tests` — bridge + runner + sources, no network |

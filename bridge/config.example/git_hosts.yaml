@@ -1,0 +1,11 @@
+# Copy to /srv/sireum/bridge/git_hosts.yaml. Keys live in api_key_file (0600), never here.
+hosts:
+  # Phase 0 sandbox host: a directory of bare repos on the hub (type local, no key).
+  - id: local-sandbox
+    type: local
+    git_url: /srv/sireum/sandbox-host
+  - id: github-adaptiv
+    type: github
+    api_url: https://api.github.com
+    git_url: https://github.com
+    api_key_file: /srv/sireum/secrets/github-adaptiv.key

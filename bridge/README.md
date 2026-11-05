@@ -2,6 +2,41 @@
 
 > Draft rev 3. Control-plane service on `sireum-hub`, including the git relay.
 
+## Implementation
+
+`sireum_bridge/` is a stdlib + PyYAML service:
+
+| Module | What |
+|---|---|
+| `server.py` | HTTP API, dispatch, lease/fencing, results, limits + auto-pause, reconciler, Discord |
+| `relay.py` | Hub mirrors, bundle verify, push, MR adapters (github / gitlab / gitea; `local` + `generic` push only) |
+| `booster.py` | Poll → allowlist → claim → dispatch; claim grace; result write-back via an outbox (retried) |
+| `sources.py` | `kanban-ssh` (Hermes via `sireum-kanban`), `github` (Issues), `file` (tests); card parser |
+| `nodes.py` | Join codes, enroll, seats (Nomad Variables, or 0600 file without Nomad), leave |
+| `apis.py` | Nomad + Tailscale HTTP clients |
+| `cli.py` | `sireum-hub serve | invite [--name] [--ts-auth-key] [--revoke] | nodes` |
+
+Extra env beyond the table below: `SOURCE` (`kanban-ssh:user@host#keyfile`,
+`github:owner/repo#tokenfile`, `file:path`), `NOMAD_SERVERS`, `NOMAD_VERSION`,
+`NOMAD_NODE_TOKEN`, `NOMAD_MINT_NODE_TOKENS`, `RUNNER_IMAGE`, `SQUID_IMAGE`, `REGISTRY`,
+`TS_OAUTH_CLIENT_ID` / `TS_OAUTH_CLIENT_SECRET` / `TS_TAILNET`, `LEASE_TTL_SEC`,
+`RECONCILE_INTERVAL`. Template: `hub/bridge.env.example`.
+
+Never-leased jobs are cancelled after `CLAIM_GRACE` (`error.code=no_capacity`, Nomad job
+stopped, card released) — this is how "no free worker" hands cards back to Hermes.
+
+```bash
+pip install -r bridge/requirements.txt
+cp -r bridge/config.example /srv/sireum/bridge   # edit git_hosts.yaml / repos.yaml
+WORKER_TOKEN=… OPERATOR_TOKEN=… BRIDGE_PUBLIC_URL=http://<hub>:8787 \
+  PYTHONPATH=bridge python3 -m sireum_bridge --config /srv/sireum/bridge --state /srv/sireum/state \
+  --listen 0.0.0.0:8787
+```
+
+Fencing: a lease is *current* while it is the job's latest lease and not released. An
+expired-but-not-superseded lease can still deliver a spooled result; once a reschedule takes
+a new lease, the old one's bundle and result get `409`.
+
 ## Responsibility
 
 Boost Hermes: claim opt-in (`remote`) cards, lease and dispatch them, relay git

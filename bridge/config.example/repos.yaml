@@ -1,0 +1,13 @@
+# Only enabled repos are dispatched. Enable a repo only after its default branch
+# is protected on the host and the host key can push branches and open MRs.
+repos:
+  - alias: sandbox
+    git_host: local-sandbox
+    path: sireum-sandbox
+    default_branch: main
+    enabled: true
+  - alias: example
+    git_host: github-adaptiv
+    path: adaptiv/example
+    default_branch: main
+    enabled: false

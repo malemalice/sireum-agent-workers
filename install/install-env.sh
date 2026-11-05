@@ -75,6 +75,21 @@ NOMAD_TOKEN="$(jq -r .nomad_client_token <<<"$ENROLL")"
 NODE_SECRET="$(jq -r .node_secret <<<"$ENROLL")"
 export RUNNER_IMAGE="$(jq -r .runner_image <<<"$ENROLL")"
 export SQUID_IMAGE="$(jq -r .squid_image <<<"$ENROLL")"
+REGISTRY="$(jq -r '.registry // empty' <<<"$ENROLL")"
+
+# The hub registry is plain HTTP inside the tailnet (WireGuard-encrypted).
+if [[ -n "$REGISTRY" ]]; then
+  say "Trusting the hub registry $REGISTRY"
+  python3 - "$REGISTRY" <<'PY'
+import json, os, sys
+p = "/etc/docker/daemon.json"
+d = json.load(open(p)) if os.path.exists(p) else {}
+regs = set(d.get("insecure-registries", [])) | {sys.argv[1]}
+d["insecure-registries"] = sorted(regs)
+json.dump(d, open(p, "w"), indent=2)
+PY
+  systemctl restart docker
+fi
 
 # 5. Nomad (HashiCorp apt repo, pinned version from the hub)
 if ! command -v nomad >/dev/null; then
@@ -130,8 +145,11 @@ printf '[Service]\nEnvironmentFile=/etc/sireum/nomad.env\n' > /etc/systemd/syste
 systemctl daemon-reload
 systemctl enable --now nomad
 
-# 8. Helper command
+# 8. Helper command + disk alarm on the cache
 install -m 0755 "$HERE/sireum" /usr/local/bin/sireum
+printf '%s\n' "$RUNNER_IMAGE" > /etc/sireum/runner_image
+install -m 0755 "$ROOT/hub/sireum-disk-alert.sh" /usr/local/bin/sireum-disk-alert
+echo '*/15 * * * * root /usr/local/bin/sireum-disk-alert /srv/sireum/cache' > /etc/cron.d/sireum-worker
 
 # 9. Self-check
 say "Checking"

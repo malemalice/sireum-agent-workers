@@ -146,3 +146,19 @@ Runner image pinned by digest, multi-arch, CLIs pinned by npm version, no
 - [ ] No git credential anywhere in the env.
 - [ ] Seat token variable exists for this node only.
 - [ ] Cache cap + alert set.
+
+## Implementation deviations (2026-11-05)
+
+- **Nomad worker token is shared.** Nomad ACLs can't scope `node:write` to one node, so
+  every PC gets the same `sireum-worker-node` token (used only by `sireum pause/resume`).
+  Impact: a holder can drain any node (stops new work only). Rotate it if a PC is lost.
+  Per-PC tokens: `NOMAD_MINT_NODE_TOKENS=1` (the bridge then needs a management token).
+- **Registry over plain HTTP on the tailnet.** Workers list the hub registry in Docker's
+  `insecure-registries`. Transport is WireGuard; images are pinned by digest.
+- **Without Nomad** (Phase 0), seat tokens are stored on the hub in
+  `/srv/sireum/state/seats/<node>.json` (0600), still never on the PC.
+- **Fake executor** exists for tests: enabled only when the worker env sets both
+  `SIREUM_ALLOW_FAKE_EXECUTOR=1` and `SIREUM_EXECUTOR_OVERRIDE=fake`. Never set these on a
+  real worker; the bridge never accepts `fake` as an executor.
+- The `sireum` user on `hermes-host` needs a real shell (`/bin/bash`), not `nologin`:
+  sshd runs the forced command through the user's shell.

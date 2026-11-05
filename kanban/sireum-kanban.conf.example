@@ -1,0 +1,18 @@
+# /etc/sireum-kanban.conf on hermes-host — match these to `hermes kanban --help`.
+# Placeholders: {card} {tag} {text_file}. {HERMES} expands to HERMES below.
+HERMES=/home/hermes/.local/bin/hermes
+LIST_JSON={HERMES} kanban list --tag remote --format json
+SHOW_JSON={HERMES} kanban show {card} --format json
+TAG_ADD={HERMES} kanban tag {card} --add {tag}
+TAG_REMOVE={HERMES} kanban tag {card} --remove {tag}
+COMMENT={HERMES} kanban comment {card} --author sireum --file {text_file}
+COMPLETE={HERMES} kanban move {card} done
+REQUEST_REVIEW={HERMES} kanban move {card} review
+BLOCK={HERMES} kanban move {card} blocked
+# Field names in the JSON that LIST_JSON / SHOW_JSON print.
+F_ID=id
+F_TITLE=title
+F_BODY=description
+F_TAGS=tags
+F_TAGGED_BY=tagged_by
+F_CREATED=created_at

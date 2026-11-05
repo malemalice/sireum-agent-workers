@@ -1,0 +1,22 @@
+[Unit]
+Description=Sireum bridge (control plane + git relay)
+After=network-online.target tailscaled.service nomad.service
+Wants=network-online.target
+
+[Service]
+User=sireum
+Group=sireum
+EnvironmentFile=/srv/sireum/secrets/bridge.env
+ExecStart=/opt/sireum/venv/bin/python -m sireum_bridge serve --config /srv/sireum/bridge --state /srv/sireum/state --listen 127.0.0.1:8787
+WorkingDirectory=/opt/sireum/src/bridge
+Environment=PYTHONPATH=/opt/sireum/src/bridge
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/srv/sireum/state
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

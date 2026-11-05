@@ -143,6 +143,8 @@ See `PLAN.md` §14.
 
 ## 10. Backlog
 
+> Build status per item: `PLAN.md` §11 Phase 0 progress table.
+
 | Priority | Epic | Story | Size |
 |---|---|---|---|
 | P0 | Contracts | `Job`/`Result` v1: lease, bundle, test targets, `error.code` | S |

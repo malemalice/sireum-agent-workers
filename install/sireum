@@ -7,7 +7,11 @@ HUB_URL="$(cat /etc/sireum/hub_url 2>/dev/null || true)"
 NODE_NAME="$(cat /etc/sireum/node_name 2>/dev/null || true)"
 NODE_SECRET="$(cat /etc/sireum/node_secret 2>/dev/null || true)"
 [[ -f /etc/sireum/nomad.env ]] && . /etc/sireum/nomad.env && export NOMAD_TOKEN
-NODE_ID() { nomad node status -self -short 2>/dev/null | awk '/^ID/{print $3}'; }
+RUNNER_IMAGE="$(cat /etc/sireum/runner_image 2>/dev/null || echo curlimages/curl)"
+probe() {  # probe <proxy|direct> <url> -> exit 0 if reachable
+  local px=(); [[ "$1" == proxy ]] && px=(-x http://egress:3128)
+  docker run --rm --network sireum-jobs --entrypoint curl "$RUNNER_IMAGE" -fs -o /dev/null -m 8 "${px[@]}" "$2"
+}
 
 ok()  { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 bad() { printf '  \033[31m✗\033[0m %s\n' "$*"; FAILED=1; }
@@ -55,12 +59,12 @@ case "$cmd" in
     curl -fsS -m 5 "$HUB_URL/healthz" >/dev/null 2>&1 && ok "Hub reachable" || bad "Hub not reachable ($HUB_URL)"
     [[ "$(docker network inspect sireum-jobs --format '{{.Internal}}' 2>/dev/null)" == "true" ]] \
       && ok "Sandbox network is closed" || bad "Sandbox network missing or not internal"
-    docker run --rm --network sireum-jobs curlimages/curl -s -m 5 https://example.com >/dev/null 2>&1 \
-      && bad "Jobs can reach the internet directly" || ok "No direct internet from jobs"
-    docker run --rm --network sireum-jobs -e HTTPS_PROXY=http://egress:3128 curlimages/curl -s -m 5 https://github.com >/dev/null 2>&1 \
-      && bad "Jobs can reach git hosts" || ok "Git hosts blocked for jobs"
-    docker run --rm --network sireum-jobs -e HTTPS_PROXY=http://egress:3128 curlimages/curl -s -m 5 https://registry.npmjs.org >/dev/null 2>&1 \
-      && ok "Package registry allowed via proxy" || bad "Proxy not allowing package registry"
+    docker image inspect "$RUNNER_IMAGE" >/dev/null 2>&1 && ok "Runner image present" || bad "Runner image missing ($RUNNER_IMAGE)"
+    probe direct https://example.com && bad "Jobs can reach the internet directly" || ok "No direct internet from jobs"
+    probe proxy https://github.com && bad "Jobs can reach git hosts" || ok "Git hosts blocked for jobs"
+    probe proxy http://192.168.1.1 && bad "Jobs can reach the LAN" || ok "LAN blocked for jobs"
+    probe proxy https://registry.npmjs.org && ok "Package registry allowed via proxy" || bad "Proxy not allowing package registry"
+    probe proxy "$HUB_URL/healthz" && ok "Hub reachable from jobs via proxy" || bad "Jobs cannot reach the hub via proxy"
     nomad node status -self -short >/dev/null 2>&1 && ok "Nomad client registered" || bad "Nomad client not registered"
     exit "$FAILED"
     ;;

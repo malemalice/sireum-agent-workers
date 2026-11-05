@@ -5,6 +5,13 @@
 
 ## 1. `sireum-hub` (always-on home PC)
 
+**Scripted:** `sudo ./hub/install-hub.sh` does everything below (Nomad 2.1.1 server with
+ACL bootstrap and the `sireum-bridge` / `sireum-worker-node` policies, registry on the
+tailnet IP, bridge as a systemd service behind `tailscale serve --https=443`, the runner
+Nomad job, snapshot / disk-alert / `git gc` crons, the kanban SSH key, and the
+`sireum-hub` wrapper), then prints the manual steps. The hand-written steps are kept
+for reference.
+
 ```bash
 # Nomad server
 sudo install -m 0755 nomad /usr/local/bin/nomad
@@ -34,10 +41,13 @@ tailscale cert sireum-hub.<tailnet>.ts.net
 ## 2. `hermes-host` (kanban access only, public SSH)
 
 ```bash
-sudo useradd -r -m -s /usr/sbin/nologin sireum
-sudo install -m 0755 sireum-kanban /usr/local/bin/sireum-kanban
+# Scripted: sudo kanban/install-on-hermes-host.sh "<hub public key>"
+# (the user needs a real shell — sshd runs the forced command through it)
+sudo useradd -m -s /bin/bash sireum
+sudo install -m 0755 kanban/sireum-kanban /usr/local/bin/sireum-kanban
+sudo install -m 0644 kanban/sireum-kanban.conf.example /etc/sireum-kanban.conf   # then match to `hermes kanban --help`
 # ~sireum/.ssh/authorized_keys:
-# restrict,command="/usr/local/bin/sireum-kanban" ssh-ed25519 AAAA... sireum-hub
+# command="/usr/local/bin/sireum-kanban",restrict ssh-ed25519 AAAA... sireum-hub
 ```
 
 From the hub: `ssh sireum@<hermes-host-public> list-remote`. No Tailscale on

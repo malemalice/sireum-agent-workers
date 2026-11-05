@@ -1,0 +1,27 @@
+# sireum-runner:browser — Playwright browsers + the base runner (multi-arch).
+# Build with scripts/build-images.sh. Job class `browser` (4 CPU / 8 GB / shm 1 GB).
+FROM mcr.microsoft.com/playwright:v1.64.1-noble@sha256:2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f
+
+ARG CLAUDE_CODE_VERSION=2.1.318
+ARG OPENCODE_VERSION=1.19.5
+ENV PLAYWRIGHT_VERSION=1.64.1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl git jq python3 python3-venv python3-yaml \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m -u 10001 runner \
+    && chmod -R a+rX /ms-playwright
+
+RUN npm install -g --omit=dev \
+      @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+      opencode-ai@${OPENCODE_VERSION} \
+    && npm cache clean --force
+
+WORKDIR /opt/runner
+COPY entrypoint.py /opt/runner/entrypoint.py
+
+USER runner
+RUN claude --version && opencode --version && ls /ms-playwright >/dev/null
+
+ENTRYPOINT ["python3", "/opt/runner/entrypoint.py"]

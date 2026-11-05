@@ -123,6 +123,8 @@ The bridge returns the Job wrapped with a lease and hub clone details:
 | `git` | Clone/worktree/bundle error |
 | `executor` | CLI crash / non-zero exit |
 | `lease_lost` | Heartbeat or fencing failed |
+| `no_capacity` | No worker leased the job within `CLAIM_GRACE` (bridge-generated) |
+| `dispatch` | Nomad dispatch failed (bridge-generated) |
 | `prepare` | Prepare phase failed (Phase 3) |
 
 ### Status values (booster semantics)
@@ -142,6 +144,16 @@ The bridge returns the Job wrapped with a lease and hub clone details:
 2. The bridge ignores Results and bundles whose `lease_id` is not current.
 3. `usage` is best-effort.
 4. Never include secrets, tokens, or environment dumps.
+
+### Implementation notes (rev 3.1)
+
+- `base_ref` must match `[A-Za-z0-9][A-Za-z0-9._/-]*` (no `..`, no `//`); `test_target` is a name.
+- The bridge adds `dispatch_id` (Nomad dispatched job id) to the stored Job; runners ignore it.
+- A lease is **current** while it is the job's latest lease and not released. An expired but
+  not superseded lease may still deliver a spooled bundle/result; a newer lease fences it.
+- The bridge adds `pushed` (bool) and, on push/MR failure, `hub_error` to the stored Result;
+  a `success` whose push fails becomes `needs_review`.
+- A Result's `status` must be one of the five values below or the bridge returns `400`.
 
 ## 3. Versioning
 

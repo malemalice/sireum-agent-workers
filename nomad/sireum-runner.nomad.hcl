@@ -1,11 +1,13 @@
-# Draft — verify every stanza against the installed Nomad version.
+# Verify every stanza against the installed Nomad version (hub installs 2.1.1).
+# hub/install-hub.sh renders the BRIDGE_URL and image placeholders and runs this job.
 job "sireum-runner" {
   type        = "batch"
   datacenters = ["dc1"]
   priority    = 50
 
+  # The bridge dispatches with meta job_id only; the runner leases the full Job over HTTP.
   parameterized {
-    payload       = "required"
+    payload       = "optional"
     meta_required = ["job_id"]
   }
 

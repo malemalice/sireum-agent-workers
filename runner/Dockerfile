@@ -3,16 +3,16 @@
 #          --build-arg CLAUDE_CODE_VERSION=X.Y.Z --build-arg OPENCODE_VERSION=X.Y.Z \
 #          -t sireum-hub.<tailnet>.ts.net:5000/sireum-runner:base-<ver> --push .
 # Pin the base by its multi-arch index digest.
-FROM node:22-bookworm-slim@sha256:<pinned-index-digest>
+FROM node:22-bookworm-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da
 
-ARG CLAUDE_CODE_VERSION
-ARG OPENCODE_VERSION
+ARG CLAUDE_CODE_VERSION=2.1.318
+ARG OPENCODE_VERSION=1.19.5
 RUN test -n "$CLAUDE_CODE_VERSION" && test "$CLAUDE_CODE_VERSION" != "latest" \
  && test -n "$OPENCODE_VERSION"   && test "$OPENCODE_VERSION"   != "latest"
 
 # git is used locally only (clone from hub, commit, bundle); no credentials in the image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates git jq python3 python3-venv \
+      ca-certificates curl git jq python3 python3-venv python3-yaml \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -u 10001 runner
 

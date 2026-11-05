@@ -205,6 +205,26 @@ Estimates: one engineer + Claude Code. The critical path is the non-compressible
       sandbox repo on one host.
 
 ### Phase 0 — prove the runner on the MBP M2 (≈1–2 days)
+
+**Progress (2026-11-05):** code is complete for Phase 0, Phase 1, Phase 3 and the
+GitHub Issues part of Phase 4. Everything runs with a fake executor against a local sandbox
+git host; nothing has run on real hardware yet.
+
+| Area | Built | Verified locally | Needs the operator / real hardware |
+|---|---|---|---|
+| Bridge: lease/fencing, git relay, bundle intake, push, results, limits, auto-pause, reconciler | ✓ | 14 e2e tests | real git host push + MR |
+| Runner: clone, worktree, executor, tests, bundle, spool, heartbeat | ✓ | e2e + Docker smoke (12 checks) | one real Claude / OpenCode seat job; `max_turns` |
+| Runner image `:base` (arm64 + amd64) | ✓ | arm64 built and run; amd64 built and run under emulation | push to the hub registry |
+| Egress: internal network + squid | ✓ (squid.conf log fix) | hub/model OK; git host, LAN, tailnet, direct all blocked | inside Lima / WSL2 |
+| Booster loop: poll, allowlist, claim, grace release, write-back outbox | ✓ | file-source tests | real `hermes kanban` |
+| `sireum-kanban` forced command | ✓ | against a fake `hermes` CLI | **match the command templates to the real CLI** |
+| Enrollment: `sireum-hub invite`, enroll / seats / leave | ✓ | tests (no Tailscale/Nomad) | Tailscale OAuth key minting, Nomad Variables |
+| Hub installer (`hub/install-hub.sh`), Nomad server + ACL policies, crons | ✓ | syntax only | run on the hub PC |
+| Worker installers (`install/`) | updated | syntax only | MBP (Lima), one Windows PC |
+| Prepare step + `:browser` image (Phase 3) | ✓ | 4 prepare tests | build `:browser` (skipped here: low disk) |
+| GitHub Issues source + GitHub/GitLab/Gitea MR adapters (Phase 4) | ✓ | fake-API tests | real APIs |
+| Notion / Jira sources, gVisor, OSV, mirrors (Phases 4–5) | — | — | not started |
+
 - Everything on one machine: the bridge **stub** runs on macOS (or a second Lima
   VM) as a stand-in hub; the worker runs in the `sireum` Lima VM.
 - arm64 `sireum-runner:base` first (pinned Claude Code + OpenCode); amd64 added
@@ -299,7 +319,7 @@ Estimates: one engineer + Claude Code. The critical path is the non-compressible
 | Question | Owner | Needed by |
 |---|---|---|
 | Which PC is `sireum-hub`? (tentative) | operator | Phase 1 |
-| MBP M2 RAM (sizes the Lima env) | operator | Phase 0 |
+| ~~MBP M2 RAM~~ — **8 GB** ⇒ Lima 2 CPU / 4 GB, one `standard` job | operator | Phase 0 ✓ |
 | Sandbox repo + its host for Phase 0 | operator | Phase 0 |
 | Initial `repos.yaml` list (which repos may be boosted) | operator | Phase 1 |
 | `hermes kanban` atomic claim / tag add-remove? | operator | Phase 1 |
@@ -330,3 +350,8 @@ Estimates: one engineer + Claude Code. The critical path is the non-compressible
 | 2026-11-05 | **Phase 0 entirely on the MBP M2** (stub hub + Lima worker) | Hub host still tentative; arm64 first |
 | 2026-11-05 | **Repo per card** via `repo:` label, onboarded repos only | Tasks span repos; unknown repos return to Hermes |
 | 2026-11-05 | **One-command worker install with a join code** + `sireum` helper | Manual setup was too technical for non-ops users; manual path kept in operations.md |
+| 2026-11-05 | Bridge in Python stdlib + PyYAML, SQLite, no web framework | Small surface; runs anywhere the hub has python3 |
+| 2026-11-05 | Workers share one Nomad `node:write` token by default | Nomad can't scope node:write to one node; per-PC minting optional (`NOMAD_MINT_NODE_TOKENS=1`, needs a management token) |
+| 2026-11-05 | Hub registry is plain HTTP on the tailnet (`insecure-registries`) | Tailscale serve can't expose :5000 with TLS; traffic is WireGuard-encrypted |
+| 2026-11-05 | Runner fetches hub refs into `refs/remotes/hub/*` | A shared mirror's `fetch --prune` deleted concurrent jobs' local branches (found in tests) |
+| 2026-11-05 | Hermes kanban calls isolated in `/etc/sireum-kanban.conf` templates | Hermes CLI not available to verify; one file to adjust on hermes-host |

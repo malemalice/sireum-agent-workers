@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""sireum-kanban — SSH forced command on hermes-host. No daemon, no state beyond a lock file.
+
+authorized_keys (user `sireum`):
+  command="/usr/local/bin/sireum-kanban",restrict ssh-ed25519 AAAA… sireum-hub
+
+Verbs (from SSH_ORIGINAL_COMMAND; anything else is refused):
+  list-remote                 JSON array of cards tagged `remote` and not yet claimed:
+                              [{id,title,body,tags,tagged_by,created_at}]
+  claim <card>                exit 0 = claimed by Sireum, exit 1 = taken / no longer remote
+  comment <card>              comment text on stdin (max 16 KB)
+  complete|request-review|block|release <card>
+
+Every Hermes call goes through the command templates in /etc/sireum-kanban.conf so
+they can be matched to the installed `hermes kanban` CLI without editing this file.
+VERIFY each template against `hermes kanban --help` on hermes-host before Phase 1.
+"""
+import fcntl
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+
+CONF = os.environ.get("SIREUM_KANBAN_CONF", "/etc/sireum-kanban.conf")
+CLAIM_TAG = "sireum:claimed"
+
+# Defaults — placeholders until checked against the real CLI. {card}, {tag}, {text_file} are substituted.
+TEMPLATES = {
+    "HERMES": "hermes",
+    "LIST_JSON": "{HERMES} kanban list --tag remote --format json",
+    "SHOW_JSON": "{HERMES} kanban show {card} --format json",
+    "TAG_ADD": "{HERMES} kanban tag {card} --add {tag}",
+    "TAG_REMOVE": "{HERMES} kanban tag {card} --remove {tag}",
+    "COMMENT": "{HERMES} kanban comment {card} --author sireum --file {text_file}",
+    "COMPLETE": "{HERMES} kanban move {card} done",
+    "REQUEST_REVIEW": "{HERMES} kanban move {card} review",
+    "BLOCK": "{HERMES} kanban move {card} blocked",
+    # JSON field names in LIST/SHOW output.
+    "F_ID": "id", "F_TITLE": "title", "F_BODY": "description", "F_TAGS": "tags",
+    "F_TAGGED_BY": "tagged_by", "F_CREATED": "created_at",
+    "LOCK": "/tmp/sireum-kanban.lock",
+}
+
+CARD_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
+
+
+def load_conf() -> dict:
+    t = dict(TEMPLATES)
+    if os.path.exists(CONF):
+        for line in open(CONF):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                t[k.strip()] = v.strip().strip('"')
+    return t
+
+
+T = load_conf()
+
+
+def die(msg: str, code: int = 2):
+    print(f"sireum-kanban: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def run(key: str, **kw) -> str:
+    tmpl = T[key].replace("{HERMES}", T["HERMES"])
+    argv = [a.format(**{k: v for k, v in kw.items()}) for a in shlex.split(tmpl)]
+    p = subprocess.run(argv, capture_output=True, text=True, timeout=50)
+    if p.returncode != 0:
+        die(f"{key} failed ({p.returncode}): {p.stderr.strip()[:300]}", 3)
+    return p.stdout
+
+
+def card_obj(c: dict) -> dict:
+    tags = c.get(T["F_TAGS"]) or []
+    if isinstance(tags, str):
+        tags = [x.strip() for x in tags.split(",") if x.strip()]
+    return {"id": str(c.get(T["F_ID"])), "title": c.get(T["F_TITLE"]) or "",
+            "body": c.get(T["F_BODY"]) or "", "tags": tags,
+            "tagged_by": c.get(T["F_TAGGED_BY"]), "created_at": c.get(T["F_CREATED"])}
+
+
+def show(card: str) -> dict:
+    data = json.loads(run("SHOW_JSON", card=card) or "{}")
+    return card_obj(data.get("card", data) if isinstance(data, dict) else {})
+
+
+def main():
+    cmd = shlex.split(os.environ.get("SSH_ORIGINAL_COMMAND", "") or " ".join(sys.argv[1:]))
+    if not cmd:
+        die("no command")
+    verb, args = cmd[0], cmd[1:]
+    if verb == "list-remote" and not args:
+        data = json.loads(run("LIST_JSON") or "[]")
+        cards = [card_obj(c) for c in (data.get("cards", []) if isinstance(data, dict) else data)]
+        print(json.dumps([c for c in cards if "remote" in c["tags"] and CLAIM_TAG not in c["tags"]]))
+        return
+    if len(args) != 1 or not CARD_RE.match(args[0]):
+        die("usage: <verb> <card-id>")
+    card = args[0]
+    with open(T["LOCK"], "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        if verb == "claim":
+            c = show(card)
+            if "remote" not in c["tags"] or CLAIM_TAG in c["tags"]:
+                sys.exit(1)
+            run("TAG_ADD", card=card, tag=CLAIM_TAG)
+        elif verb == "comment":
+            text = sys.stdin.read(16384)
+            path = f"/tmp/sireum-kanban-{os.getpid()}.txt"
+            try:
+                with open(path, "w") as f:
+                    f.write(text)
+                run("COMMENT", card=card, text_file=path)
+            finally:
+                os.unlink(path)
+        elif verb in ("complete", "request-review", "block"):
+            run("TAG_REMOVE", card=card, tag=CLAIM_TAG)
+            run("TAG_REMOVE", card=card, tag="remote")
+            run({"complete": "COMPLETE", "request-review": "REQUEST_REVIEW", "block": "BLOCK"}[verb], card=card)
+        elif verb == "release":
+            # Back to Hermes: drop the opt-in and the claim; leave the card where it was.
+            run("TAG_REMOVE", card=card, tag=CLAIM_TAG)
+            run("TAG_REMOVE", card=card, tag="remote")
+        else:
+            die(f"unknown verb {verb!r}")
+
+
+if __name__ == "__main__":
+    main()
