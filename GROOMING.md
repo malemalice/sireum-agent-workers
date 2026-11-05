@@ -157,6 +157,8 @@ See `PLAN.md` §14.
 | P1 | Bridge | Poll, claim, dispatch, results, claim grace, release | M |
 | P1 | Bridge | Per-executor limits (default unlimited) + auto-pause + `auto` failover | S |
 | P1 | Bridge | Discord webhook, `/status` | S |
+| P0 | Onboarding | macOS/Linux installer + `sireum` helper (test on MBP M2) | S |
+| P1 | Onboarding | `sireum-hub invite`, enroll/seats/leave endpoints, Windows installer | S |
 | P2 | Ops | Mixed-OS fleet, sleep/WSL shutdown/hub-reboot tests | S |
 | P2 | Ops | Cache caps + prune + alerts (hub and workers) | S |
 | P3 | Tooling | `:browser`, prepare phase, Playwright cache | M |

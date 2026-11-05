@@ -216,6 +216,13 @@ Estimates: one engineer + Claude Code. The critical path is the non-compressible
   host with its API key, result endpoint.
 - One manual `docker run` (no Nomad, no kanban).
 - Moving to the real hub in Phase 1 is a config change (`BRIDGE_URL`, Tailscale name).
+- Test the macOS installer (`install/install.sh`) end to end on the MBP; fix
+  until a fresh Mac goes from join code to `sireum check` all ✓ in one command.
+
+### Phase 1 addition — simple onboarding
+- `sireum-hub invite` (Tailscale API auth key + one-time enroll token → join code).
+- Bridge endpoints: `/v1/nodes/enroll`, `/v1/nodes/{name}/seats`, `DELETE /v1/nodes/{name}`.
+- Windows installer (`install/install.ps1`) tested on one Windows PC.
 - Verify: branch appears on the git host via the hub; worker has no git
   credential; non-allowlisted, LAN, and mesh targets blocked; seat token absent
   after the job.
@@ -322,3 +329,4 @@ Estimates: one engineer + Claude Code. The critical path is the non-compressible
 | 2026-11-05 | Browser/prepare in Phase 3 | Not needed to prove the runner |
 | 2026-11-05 | **Phase 0 entirely on the MBP M2** (stub hub + Lima worker) | Hub host still tentative; arm64 first |
 | 2026-11-05 | **Repo per card** via `repo:` label, onboarded repos only | Tasks span repos; unknown repos return to Hermes |
+| 2026-11-05 | **One-command worker install with a join code** + `sireum` helper | Manual setup was too technical for non-ops users; manual path kept in operations.md |

@@ -204,142 +204,124 @@ You're Claude Code or OpenCode, started by `sireum-runner` in a worktree.
 
 ---
 
-## Part 2 — Set up Sireum on a workstation or PC
+## Part 2 — Set up Sireum on your PC
 
-There are three roles. Most people only need **2a, a worker**.
+> The installers are **drafts and not tested yet**. They'll be verified in Phase 0
+> on a MacBook Pro M2.
 
-| Role | Where | Guide |
-|---|---|---|
-| Worker | Any idle PC: Windows, macOS, Linux | 2a below |
-| Hub | One always-on PC (tentative) | 2b below + `docs/operations.md` §1 |
-| Kanban access | `hermes-host` | `docs/operations.md` §2 (operator only) |
+Turning a PC into a worker takes **three steps and about 15 minutes**. You don't
+need to know Docker, Nomad, or Tailscale; the installer handles them.
 
-### 2a. Worker
+### Before you start
 
-Each worker runs a small **Linux environment**, and everything Sireum needs runs
-inside it, so every OS behaves the same.
+- The PC has **8 GB RAM or more** and **80 GB free disk**.
+- It can stay **on, awake, and logged in** while it's a worker.
+- Ask the operator for a **join code**. It starts with `sireum1.`, works once,
+  and expires after 24 hours. Treat it like a password.
 
-**Prerequisites:**
-- At least 8 GB RAM; give the Linux env at most half.
-- 60–80 GB free disk.
-- A Tailscale account on the Sireum tailnet. Ask the operator for an auth key
-  tagged `tag:sireum-worker`.
-- The PC stays on and awake while it's offered as a worker.
-
-#### Step 1 — Create the Linux env
-
-**macOS (Intel or Apple Silicon)**
+### Step 1 — Download the installer
 
 ```bash
-brew install lima
-limactl start --name=sireum --vm-type=vz --cpus=4 --memory=8 --disk=80 template://ubuntu-lts
-limactl shell sireum
+git clone https://github.com/malemalice/sireum-agent-workers.git
+cd sireum-agent-workers/install
 ```
 
-On an 8 GB Mac, use `--cpus=2 --memory=4`. To start at login, add a LaunchAgent
-that runs `limactl start sireum`. Keep the Mac plugged in, and prevent sleep
-while it's a worker (`caffeinate -s`).
+Or download the ZIP from GitHub and open the `install` folder.
 
-**Windows 10/11**
+### Step 2 — Run it with your join code
+
+**macOS** (Terminal). Needs [Homebrew](https://brew.sh).
+
+```bash
+./install.sh sireum1.XXXXXXXX
+```
+
+**Windows** (PowerShell as Administrator):
 
 ```powershell
-wsl --install -d Ubuntu-24.04
+powershell -ExecutionPolicy Bypass -File install.ps1 sireum1.XXXXXXXX
 ```
 
-Create `%UserProfile%\.wslconfig`:
+If Windows asks to restart for WSL, restart and run the same command again.
 
-```ini
-[wsl2]
-processors=4
-memory=8GB
-vmIdleTimeout=-1
-```
-
-Inside Ubuntu, enable systemd: put `[boot]` and `systemd=true` in `/etc/wsl.conf`,
-then run `wsl --shutdown` and reopen. Add a Task Scheduler task at logon that runs
-`wsl -d Ubuntu-24.04 --exec /bin/true`. The user must stay logged in.
-
-**Linux**
-
-Use the host directly.
-
-#### Step 2 — Install the runtime inside the Linux env
+**Linux:**
 
 ```bash
-# Docker Engine — follow docs.docker.com/engine/install/ubuntu (not Docker Desktop)
-sudo usermod -aG docker "$USER"
-
-# Tailscale
-curl -fsSL https://tailscale.com/install.sh -o /tmp/ts.sh && less /tmp/ts.sh && sudo sh /tmp/ts.sh
-sudo tailscale up --auth-key=<key-from-operator> --advertise-tags=tag:sireum-worker
-
-# Nomad — install from releases.hashicorp.com (pinned version from the operator)
+./install.sh sireum1.XXXXXXXX
 ```
 
-#### Step 3 — Bootstrap Sireum
+The installer:
+
+1. Creates a small Linux environment that uses half your CPU and RAM. This is a
+   Lima VM on macOS or WSL2 on Windows; Linux uses the machine itself.
+2. Installs everything inside it and connects to the Sireum network.
+3. Registers the PC with the hub and runs a self-check.
+4. Sets Sireum to start when you log in.
+
+### Step 3 — Connect your AI subscriptions
 
 ```bash
-git clone <sireum repo> && cd sireum
-sudo ./nomad/client-bootstrap.sh
+claude setup-token     # opens a browser; sign in with your Claude account, copy the token
+sireum seats           # paste the Claude token (and an OpenCode Go token if you have one)
 ```
 
-This creates the closed `sireum-jobs` Docker network, starts the `sireum-egress`
-proxy, prepares `/srv/sireum/cache`, and pre-pulls the runner image. It prints
-the detected `host_os` and architecture.
+Tokens are stored on the hub, not on your PC.
 
-#### Step 4 — Join the fleet
-
-Write `/etc/nomad.d/client.hcl` (template in [`nomad/README.md`](nomad/README.md)),
-setting `host_os` to `macos`, `windows`, or `linux`. Then:
+That's it. Check that it worked:
 
 ```bash
-sudo systemctl enable --now nomad
+sireum status
 ```
 
-Send the operator your node name (`nomad node status -self`). The operator stores
-your seat tokens on the hub:
+### Everyday use
+
+| Command | What it does |
+|---|---|
+| `sireum status` | Shows whether this PC is working and how many jobs are running |
+| `sireum pause` | Stops taking new jobs (running jobs finish first). Use it before gaming, meetings, or travel |
+| `sireum resume` | Takes jobs again |
+| `sireum check` | Re-runs the self-check |
+| `sireum logs` | Shows recent logs for troubleshooting |
+| `sireum leave` | Removes this PC from Sireum |
+
+On macOS, closing the lid or letting the Mac sleep pauses work automatically, and
+any running job moves to another PC. On Windows, the PC must stay logged in.
+
+### If something goes wrong
+
+| What you see | What to do |
+|---|---|
+| "join code is not valid" or "hub refused the join code" | Ask the operator for a new code (codes work once and expire) |
+| "Homebrew is required" | Install it from https://brew.sh, then run the installer again |
+| Windows asks to restart | Restart, then run the same command again |
+| `sireum check` shows a ✗ | Send the output to the operator |
+| PC disappears from the fleet | Make sure it's awake and logged in; run `sireum status` |
+
+<details>
+<summary>Manual install, for people who want to do it by hand</summary>
+
+See [`docs/operations.md`](docs/operations.md) §3. It covers the Linux
+environment per OS, Docker Engine, Tailscale, Nomad, `client-bootstrap.sh`, and
+`client.hcl`.
+
+</details>
+
+### For the operator: hub setup and invites
+
+The hub is one always-on PC (which one is **tentative**). It runs the Nomad
+server, `sireum-bridge` with the git relay, and an image registry, all reachable
+only over Tailscale. See [`docs/operations.md`](docs/operations.md) §1.
+
+To invite a PC:
 
 ```bash
-nomad var put nomad/jobs/sireum-runner/seat-<node-name> claude_token=… opencode_token=…
+sireum-hub invite            # prints a one-time join code (24 h)
 ```
 
-Create the Claude token with `claude setup-token` on a machine with a browser.
-Don't save it anywhere on the worker.
+Send the code privately. The hub creates a single-use, tagged Tailscale key for
+it.
 
-#### Step 5 — Verify
-
-```bash
-nomad node status -self                       # pool=idle, os=linux, status ready
-docker network inspect sireum-jobs --format '{{.Internal}}'      # true
-
-# Egress checks (all from inside the Linux env)
-docker run --rm --network sireum-jobs curlimages/curl -m 5 https://example.com          # must FAIL
-docker run --rm --network sireum-jobs -e HTTPS_PROXY=http://egress:3128 \
-  curlimages/curl -m 5 https://github.com                                              # must FAIL
-docker run --rm --network sireum-jobs -e HTTPS_PROXY=http://egress:3128 \
-  curlimages/curl -m 5 https://registry.npmjs.org                                      # must SUCCEED
-```
-
-Then ask the operator to dispatch a test job to your node.
-
-#### Pause or remove a worker
-
-```bash
-nomad node drain -enable -deadline 10m <node-id>     # pause: finish/move jobs, take no new ones
-nomad node drain -disable <node-id>                  # resume
-```
-
-To retire the PC: drain it, stop Nomad, and ask the operator to delete your seat
-tokens. Then delete the env with `limactl delete sireum` or
-`wsl --unregister Ubuntu-24.04`.
-
-### 2b. Hub (operator)
-
-The hub is one always-on PC. Which machine is still **tentative**; during Phase 0
-a stub runs on the MBP M2. It runs the Nomad server, `sireum-bridge` (with the git
-relay and SQLite), and an image registry, all reachable only over Tailscale.
-
-You configure two files on the hub:
+Two config files on the hub decide what Sireum may touch:
 
 ```yaml
 # /srv/sireum/bridge/git_hosts.yaml — one entry per git host (API key in a 0600 file)
@@ -361,13 +343,8 @@ repos:
     enabled: true           # only after default-branch protection is on
 ```
 
-Concurrency per executor is unlimited by default; cap it if needed:
-
-```bash
-EXECUTOR_LIMITS=claude=0,opencode=0     # 0 = unlimited
-```
-
-Full steps are in [`docs/operations.md`](docs/operations.md).
+Concurrency per executor is unlimited by default. To cap it:
+`EXECUTOR_LIMITS=claude=0,opencode=0`, where `0` means unlimited.
 
 ---
 
@@ -377,7 +354,7 @@ Full steps are in [`docs/operations.md`](docs/operations.md).
 |---|---|
 | Card never picked up | Missing `remote` or `repo:` label, repo not onboarded, tagger not allowlisted, hub down |
 | Card returned with "no capacity" | No free worker, or the executor is paused after a usage limit |
-| Worker disappears | Mac asleep or lid closed; WSL shut down or user logged out |
+| Worker disappears | Mac asleep or lid closed; Windows user logged out; run `sireum status` |
 | `exec format error` | Runner image missing your architecture |
 | Result `needs_review` with `tests_modified` | The agent changed tests; review those changes first |
 
@@ -397,3 +374,4 @@ More: [`docs/operations.md`](docs/operations.md) §9.
 | [`bridge/README.md`](bridge/README.md) | Bridge API, limits, git relay, reconciler |
 | [`runner/README.md`](runner/README.md) | Runner algorithm and executor adapters |
 | [`nomad/`](nomad/) | Job spec, client bootstrap, egress allowlist |
+| [`install/`](install/) | One-command worker installers and the `sireum` helper |

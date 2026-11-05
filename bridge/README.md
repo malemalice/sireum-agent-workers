@@ -22,7 +22,32 @@ Sireum can't run them.
 | `POST` | `/v1/dispatch` | operator | Dispatch without a card (body/response in the top-level `README.md` §B) |
 | `GET` | `/v1/runs/{job_id}` | operator | Run state + Result once finished |
 | `GET` | `/status` | operator | Cards, jobs, leases, executors |
+| `POST` | `/v1/nodes/enroll` | one-time enroll token | Installer registers a PC; returns node name, Nomad settings, image digests, node secret |
+| `PUT` | `/v1/nodes/{name}/seats` | node secret | Store Claude/OpenCode tokens as Nomad Variables (never on the PC) |
+| `DELETE` | `/v1/nodes/{name}` | node secret or operator | `sireum leave`: delete seats, revoke node secret |
 | `GET` | `/healthz` | none | Liveness |
+
+## Worker enrollment (`sireum-hub invite`)
+
+```text
+operator:  sireum-hub invite [--name <pc>]
+  → mints a single-use, pre-authorised Tailscale auth key tagged tag:sireum-worker
+    (Tailscale API, OAuth client with auth_keys scope)
+  → mints a one-time enroll token (24 h)
+  → prints  sireum1.<base64url({hub, ts_auth_key, enroll_token, expires})>
+
+installer: POST /v1/nodes/enroll {host_os, arch, hostname, cpus, mem_mb}
+  ← {node_name, nomad_servers, nomad_version, nomad_client_token,
+     runner_image, squid_image, node_secret}
+  (enroll token is burned on first use)
+
+user:      sireum seats → PUT /v1/nodes/{name}/seats {claude_token, opencode_token}
+  → nomad var put nomad/jobs/sireum-runner/seat-<name> …
+```
+
+- Join codes are secrets: single use, 24 h expiry, revocable with `sireum-hub invite --revoke`.
+- `nomad_client_token` is scoped to `node:write` for this node only (used by `sireum pause/resume`).
+- `node_secret` lets the PC manage only its own seats and removal.
 
 ## Kanban access (public SSH to `hermes-host`)
 

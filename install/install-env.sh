@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# Runs INSIDE the worker Linux env (Lima VM, WSL2 distro, or a Linux host), as root.
+# Called by install.sh / install.ps1. DRAFT — not tested yet.
+#
+#   sudo SIREUM_HOST_OS=macos|windows|linux bash install-env.sh <join-code>
+#
+# Steps: decode join code → install Docker, Tailscale, Nomad → join tailnet →
+#        enroll with the hub → write Nomad client config → bootstrap network,
+#        egress proxy and cache → start Nomad → self-check → install `sireum` helper.
+set -euo pipefail
+
+JOIN_CODE="${1:?join code required}"
+HOST_OS="${SIREUM_HOST_OS:-linux}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+
+say()  { printf '\n==> %s\n' "$*"; }
+fail() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
+
+[[ $EUID -eq 0 ]] || fail "Run as root (sudo)"
+[[ "$(uname -s)" == "Linux" ]] || fail "This step runs inside Linux only"
+. /etc/os-release
+[[ "${ID:-}" == "ubuntu" || "${ID:-}" == "debian" ]] || fail "Ubuntu or Debian required (found ${ID:-unknown})"
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y -qq ca-certificates curl gnupg jq python3 >/dev/null
+
+# 1. Decode the join code: sireum1.<base64url(json)>
+say "Reading join code"
+JOIN_JSON="$(python3 -c 'import sys,base64,json; p=sys.argv[1].split(".",1)[1]; p+="="*(-len(p)%4); print(json.dumps(json.loads(base64.urlsafe_b64decode(p))))' "$JOIN_CODE")" \
+  || fail "Join code is not valid"
+HUB_URL="$(jq -r .hub <<<"$JOIN_JSON")"
+TS_KEY="$(jq -r .ts_auth_key <<<"$JOIN_JSON")"
+ENROLL_TOKEN="$(jq -r .enroll_token <<<"$JOIN_JSON")"
+EXPIRES="$(jq -r .expires <<<"$JOIN_JSON")"
+echo "Hub: $HUB_URL (code expires $EXPIRES)"
+
+# 2. Docker Engine (official apt repo)
+if ! command -v docker >/dev/null; then
+  say "Installing Docker Engine"
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL "https://download.docker.com/linux/${ID}/gpg" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${ID} ${VERSION_CODENAME} stable" \
+    > /etc/apt/sources.list.d/docker.list
+  apt-get update -qq
+  apt-get install -y -qq docker-ce docker-ce-cli containerd.io >/dev/null
+  systemctl enable --now docker
+fi
+
+# 3. Tailscale (official apt repo)
+if ! command -v tailscale >/dev/null; then
+  say "Installing Tailscale"
+  curl -fsSL "https://pkgs.tailscale.com/stable/${ID}/${VERSION_CODENAME}.noarmor.gpg" -o /usr/share/keyrings/tailscale-archive-keyring.gpg
+  curl -fsSL "https://pkgs.tailscale.com/stable/${ID}/${VERSION_CODENAME}.tailscale-keyring.list" -o /etc/apt/sources.list.d/tailscale.list
+  apt-get update -qq
+  apt-get install -y -qq tailscale >/dev/null
+  systemctl enable --now tailscaled
+fi
+say "Joining the Sireum tailnet"
+tailscale up --auth-key="$TS_KEY" --advertise-tags=tag:sireum-worker --hostname="sireum-$(hostname -s)"
+
+# 4. Enroll with the hub → node name, Nomad settings, image digests
+say "Registering this PC with the hub"
+ENROLL="$(curl -fsS -X POST "$HUB_URL/v1/nodes/enroll" \
+  -H "Authorization: Bearer $ENROLL_TOKEN" -H 'Content-Type: application/json' \
+  -d "$(jq -n --arg os "$HOST_OS" --arg arch "$(uname -m)" --arg host "$(hostname -s)" \
+        --argjson cpus "$(nproc)" --argjson mem_mb "$(( $(awk '/MemTotal/{print $2}' /proc/meminfo) / 1024 ))" \
+        '{host_os:$os, arch:$arch, hostname:$host, cpus:$cpus, mem_mb:$mem_mb}')")" \
+  || fail "The hub refused the join code (expired or already used?). Ask the operator for a new one."
+NODE_NAME="$(jq -r .node_name <<<"$ENROLL")"
+NOMAD_VERSION="$(jq -r .nomad_version <<<"$ENROLL")"
+NOMAD_SERVERS="$(jq -c .nomad_servers <<<"$ENROLL")"
+NOMAD_TOKEN="$(jq -r .nomad_client_token <<<"$ENROLL")"
+NODE_SECRET="$(jq -r .node_secret <<<"$ENROLL")"
+export RUNNER_IMAGE="$(jq -r .runner_image <<<"$ENROLL")"
+export SQUID_IMAGE="$(jq -r .squid_image <<<"$ENROLL")"
+
+# 5. Nomad (HashiCorp apt repo, pinned version from the hub)
+if ! command -v nomad >/dev/null; then
+  say "Installing Nomad $NOMAD_VERSION"
+  curl -fsSL https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+  echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com ${VERSION_CODENAME} main" \
+    > /etc/apt/sources.list.d/hashicorp.list
+  apt-get update -qq
+  apt-get install -y -qq "nomad=${NOMAD_VERSION}*" >/dev/null
+fi
+
+say "Writing Nomad client config"
+install -d -m 0750 /etc/nomad.d /etc/sireum
+cat > /etc/nomad.d/client.hcl <<EOF
+datacenter = "dc1"
+name       = "${NODE_NAME}"
+data_dir   = "/opt/nomad/data"
+bind_addr  = "{{ GetInterfaceIP \"tailscale0\" }}"
+
+client {
+  enabled = true
+  servers = ${NOMAD_SERVERS}
+  host_volume "sireum-cache" {
+    path      = "/srv/sireum/cache"
+    read_only = false
+  }
+  meta {
+    pool    = "idle"
+    os      = "linux"
+    host_os = "${HOST_OS}"
+    agents  = "claude,opencode"
+  }
+}
+
+acl {
+  enabled = true
+}
+EOF
+umask 077
+printf 'NOMAD_TOKEN=%s\n' "$NOMAD_TOKEN" > /etc/sireum/nomad.env
+printf '%s\n' "$HUB_URL" > /etc/sireum/hub_url
+printf '%s\n' "$NODE_NAME" > /etc/sireum/node_name
+printf '%s\n' "$NODE_SECRET" > /etc/sireum/node_secret
+umask 022
+
+# 6. Network, egress proxy, cache
+say "Setting up the sandbox network and egress proxy"
+bash "$ROOT/nomad/client-bootstrap.sh"
+
+# 7. Start Nomad
+mkdir -p /etc/systemd/system/nomad.service.d
+printf '[Service]\nEnvironmentFile=/etc/sireum/nomad.env\n' > /etc/systemd/system/nomad.service.d/sireum.conf
+systemctl daemon-reload
+systemctl enable --now nomad
+
+# 8. Helper command
+install -m 0755 "$HERE/sireum" /usr/local/bin/sireum
+
+# 9. Self-check
+say "Checking"
+sireum check || fail "Self-check failed; see above. Nothing is offered to the fleet until it passes."
+
+say "This PC is now a Sireum worker: $NODE_NAME"

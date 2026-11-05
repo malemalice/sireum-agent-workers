@@ -43,7 +43,12 @@ sudo install -m 0755 sireum-kanban /usr/local/bin/sireum-kanban
 From the hub: `ssh sireum@<hermes-host-public> list-remote`. No Tailscale on
 `hermes-host`.
 
-## 3. Worker Linux env
+## 3. Worker Linux env (manual install)
+
+> Most people should use the one-command installer instead: `sireum-hub invite`
+> on the hub, then `install/install.sh` (macOS/Linux) or `install/install.ps1`
+> (Windows) on the PC. See the top-level `README.md` Part 2. This section
+> describes the same steps by hand.
 
 ### 3a. Windows (WSL2)
 

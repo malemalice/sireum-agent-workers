@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# sireum — worker helper. Runs inside the worker Linux env as root.
+# On macOS/Windows the host `sireum` command forwards here. DRAFT — not tested yet.
+set -euo pipefail
+
+HUB_URL="$(cat /etc/sireum/hub_url 2>/dev/null || true)"
+NODE_NAME="$(cat /etc/sireum/node_name 2>/dev/null || true)"
+NODE_SECRET="$(cat /etc/sireum/node_secret 2>/dev/null || true)"
+[[ -f /etc/sireum/nomad.env ]] && . /etc/sireum/nomad.env && export NOMAD_TOKEN
+NODE_ID() { nomad node status -self -short 2>/dev/null | awk '/^ID/{print $3}'; }
+
+ok()  { printf '  \033[32m✓\033[0m %s\n' "$*"; }
+bad() { printf '  \033[31m✗\033[0m %s\n' "$*"; FAILED=1; }
+
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+  status)
+    echo "Node:    ${NODE_NAME:-not enrolled}"
+    echo "Hub:     ${HUB_URL:-unknown}"
+    if nomad node status -self -short >/dev/null 2>&1; then
+      nomad node status -self -short | awk '/^(Status|Drain|Eligibility)/'
+      echo "Running jobs: $(nomad node status -self 2>/dev/null | grep -c ' running ' || true)"
+    else
+      echo "Nomad:   not running (try: sireum check)"
+    fi
+    ;;
+
+  pause)
+    nomad node drain -enable -deadline 10m -self -yes
+    echo "Paused. Running jobs finish or move; no new jobs. Resume with: sireum resume"
+    ;;
+
+  resume)
+    nomad node drain -disable -self -yes
+    nomad node eligibility -enable -self
+    echo "Resumed. This PC takes jobs again."
+    ;;
+
+  seats)
+    echo "Paste the token from 'claude setup-token' (leave empty to skip):"
+    read -r -s CLAUDE_TOKEN; echo
+    echo "Paste your OpenCode Go token (leave empty to skip):"
+    read -r -s OPENCODE_TOKEN; echo
+    curl -fsS -X PUT "$HUB_URL/v1/nodes/$NODE_NAME/seats" \
+      -H "Authorization: Bearer $NODE_SECRET" -H 'Content-Type: application/json' \
+      -d "$(jq -n --arg c "$CLAUDE_TOKEN" --arg o "$OPENCODE_TOKEN" '{claude_token:$c, opencode_token:$o}')" >/dev/null \
+      && echo "Saved on the hub. Nothing was stored on this PC."
+    ;;
+
+  check)
+    FAILED=0
+    echo "Sireum self-check"
+    docker info >/dev/null 2>&1 && ok "Docker running" || bad "Docker not running"
+    tailscale status >/dev/null 2>&1 && ok "Tailscale connected" || bad "Tailscale not connected"
+    curl -fsS -m 5 "$HUB_URL/healthz" >/dev/null 2>&1 && ok "Hub reachable" || bad "Hub not reachable ($HUB_URL)"
+    [[ "$(docker network inspect sireum-jobs --format '{{.Internal}}' 2>/dev/null)" == "true" ]] \
+      && ok "Sandbox network is closed" || bad "Sandbox network missing or not internal"
+    docker run --rm --network sireum-jobs curlimages/curl -s -m 5 https://example.com >/dev/null 2>&1 \
+      && bad "Jobs can reach the internet directly" || ok "No direct internet from jobs"
+    docker run --rm --network sireum-jobs -e HTTPS_PROXY=http://egress:3128 curlimages/curl -s -m 5 https://github.com >/dev/null 2>&1 \
+      && bad "Jobs can reach git hosts" || ok "Git hosts blocked for jobs"
+    docker run --rm --network sireum-jobs -e HTTPS_PROXY=http://egress:3128 curlimages/curl -s -m 5 https://registry.npmjs.org >/dev/null 2>&1 \
+      && ok "Package registry allowed via proxy" || bad "Proxy not allowing package registry"
+    nomad node status -self -short >/dev/null 2>&1 && ok "Nomad client registered" || bad "Nomad client not registered"
+    exit "$FAILED"
+    ;;
+
+  leave)
+    echo "This removes the PC from Sireum (drain, deregister, delete its seat tokens on the hub)."
+    read -r -p "Type 'leave' to confirm: " c; [[ "$c" == "leave" ]] || exit 1
+    nomad node drain -enable -deadline 10m -self -yes || true
+    curl -fsS -X DELETE "$HUB_URL/v1/nodes/$NODE_NAME" -H "Authorization: Bearer $NODE_SECRET" >/dev/null || true
+    systemctl disable --now nomad || true
+    tailscale logout || true
+    rm -rf /etc/sireum /srv/sireum/cache
+    echo "Done. To remove the VM too: 'limactl delete sireum' (macOS) or 'wsl --unregister sireum' (Windows)."
+    ;;
+
+  logs)
+    journalctl -u nomad -n "${1:-100}" --no-pager
+    ;;
+
+  *)
+    cat <<'EOF'
+sireum — worker helper
+
+  sireum status    show this PC's state and running jobs
+  sireum pause     stop taking new jobs (running jobs finish)
+  sireum resume    take jobs again
+  sireum seats     register Claude / OpenCode tokens with the hub
+  sireum check     run the self-check
+  sireum logs [n]  show the last n Nomad log lines
+  sireum leave     remove this PC from Sireum
+EOF
+    ;;
+esac
