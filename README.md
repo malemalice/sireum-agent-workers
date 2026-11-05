@@ -2,11 +2,12 @@
 
 > *sireum* (Sundanese: ant) — many small workers carrying tasks together.
 >
-> **Status:** code complete for Phases 0, 1 and 3 plus the GitHub Issues source.
-> It is tested locally with a fake executor (`tests/`, `scripts/phase0-smoke.sh`) but
-> **not yet run on real hardware or against Hermes**. The `hermes kanban` commands in
-> `kanban/sireum-kanban` still have to be checked. See `PLAN.md` §11 for what's verified.
-> **Owner:** Adaptiv · **Date:** 2026-11-05 (WIB)
+> **Status (2026-11-05):** hub + bridge + Nomad running on the Mac; the Hermes
+> v0.22.7 kanban source is connected and verified (`list-remote` works); Claude and
+> OpenCode seats are stored on the hub; `sireum-runner` is registered. **No worker
+> is enrolled yet** (no Nomad client). Current state, blockers and handoff:
+> [`docs/setup-status.md`](docs/setup-status.md).
+> **Owner:** Adaptiv
 
 Sireum is an optional **booster** for the Hermes kanban. A card tagged `remote`
 is picked up by an idle PC (Windows, macOS, or Linux), worked on by **Claude
@@ -39,24 +40,32 @@ There are two ways to request work. Use **A** unless you're an operator tool.
 
 Create or update a card with these fields:
 
+**Hermes v0.22.7 has no tags and no `move`.** Opt-in is therefore a body line,
+not a label, so untagged cards stay completely untouched and Hermes can still run
+the card itself if Sireum does not claim it.
+
 | Card part | Required | Value |
 |---|---|---|
 | Title | yes | Short imperative task, e.g. `Fix login redirect loop` |
+| Body line `Sireum: remote` | yes | Opts the card in. `created_by` must be allowlisted |
+| Body line `Repo: <alias>` | yes | Repo alias onboarded on the hub, e.g. `Repo: example`. Long form: `<git_host>/<path>` |
+| Body line `Executor: <name>` | no | `claude`, `opencode`, or `auto` (default `auto`) |
+| Body line `Test: <target>` | no | A **name** from the repo's `.agent/tools.yaml` `test_targets`, e.g. `Test: auth` |
+| Body line `Base: <ref>` | no | Branch/tag to start from (default: the repo's default branch) |
+| Body line `Timeout: <minutes>` | no | Default `30`, maximum set by the operator |
+| Body line `Class: <name>` | no | `standard` (default), `browser`, `heavy` |
 | Body | yes | Task description, then a line starting `Acceptance:` |
-| Label `remote` | yes | Opts the card into Sireum. Must be added by an allowlisted user |
-| Label `repo:<alias>` | yes | Repo alias onboarded on the hub, e.g. `repo:example`. Long form: `repo:<git_host>/<path>` |
-| Label `executor:<name>` | no | `claude`, `opencode`, or `auto` (default `auto`) |
-| Label `test:<target>` | no | A **name** from the repo's `.agent/tools.yaml` `test_targets`, e.g. `test:auth` |
-| Label `base:<ref>` | no | Branch/tag to start from (default: the repo's default branch) |
-| Label `timeout:<minutes>` | no | Default `30`, maximum set by the operator |
-| Label `class:<name>` | no | `standard` (default), `browser`, `heavy` |
 
 Example card:
 
 ```text
 Title:  Fix login redirect loop
-Labels: remote, repo:example, executor:auto, test:auth
 Body:
+  Sireum: remote
+  Repo: example
+  Executor: auto
+  Test: auth
+
   Users who log in from /settings are redirected back to /login forever.
   Fix the redirect handling in the auth middleware and add a regression test.
   Acceptance: auth test target passes; no change to the public API.
@@ -74,9 +83,10 @@ Body:
 #### What happens next
 
 1. Within ~30 s Sireum claims the card (or skips it if the repo isn't onboarded
-   or the tagger isn't allowlisted).
+   or the creator isn't allowlisted).
 2. If no worker or executor is free within **10 minutes**, the card is released:
-   `remote` is removed, a comment explains why, and Hermes handles it normally.
+   the `Sireum: remote` marker is removed, a comment explains why, and Hermes
+   handles it normally.
 3. Otherwise a job runs, and Sireum comments on the card with the result.
 
 #### Response: the card comment
@@ -98,8 +108,8 @@ Logs:   https://sireum-hub.<tailnet>.ts.net/runs/kb-01HXYZ
 | `success` | completed | Tests passed (or no change needed), MR opened | Review the MR; never merge without a human |
 | `needs_review` | review requested | Work pushed, but tests failed, no test target, partial branch, or tests were modified | Inspect the MR carefully, especially test changes |
 | `blocked` | blocked | Needs a human: missing system package, unclear task, missing access | Fix the blocker (manifest, image, task text), then re-tag |
-| `failed` | **returned to Hermes** | Timeout, turn cap, usage limit, crash, git error | Hermes or a human takes over; re-tag only after fixing the cause |
-| `cancelled` | **returned to Hermes** | Lease lost (PC slept), or an operator stopped it | Re-tag to retry |
+| `failed` | **returned to Hermes** | Timeout, turn cap, usage limit, crash, git error | Hermes or a human takes over; re-add the marker only after fixing the cause |
+| `cancelled` | **returned to Hermes** | Lease lost (PC slept), or an operator stopped it | Re-add the marker to retry |
 
 `error.code` in the result tells you why: `usage_limit`, `timeout`, `max_turns`,
 `git`, `executor`, `lease_lost`, `prepare`.

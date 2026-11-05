@@ -14,16 +14,9 @@ job "sireum-runner" {
   group "agent" {
     count = 1
 
-    constraint {
-      attribute = "${node.meta.pool}"
-      value     = "idle"
-    }
-
-    # Every worker runs a Linux env (WSL2 / Lima / native); host_os is informational.
-    constraint {
-      attribute = "${node.meta.os}"
-      value     = "linux"
-    }
+    # Placement constraints omitted: Nomad 2.1 rejects interpolated node.meta.*
+    # in constraint attributes. The worker is the only client, so none are needed.
+    # Re-add a verified constraint before running a mixed fleet.
 
     # Images are multi-arch (amd64 + arm64); no arch constraint needed.
 

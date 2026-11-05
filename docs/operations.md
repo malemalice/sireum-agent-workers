@@ -1,6 +1,7 @@
 # Operations Runbook — Sireum
 
 > Status: draft rev 3 · Date: 2026-11-05 (WIB)
+> Current deployed state and handoff: [`setup-status.md`](./setup-status.md).
 > All commands are illustrative; verify versions and paths. Nothing is executed yet.
 
 ## 1. `sireum-hub` (always-on home PC)

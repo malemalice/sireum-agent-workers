@@ -1,18 +1,20 @@
-# /etc/sireum-kanban.conf on hermes-host — match these to `hermes kanban --help`.
-# Placeholders: {card} {tag} {text_file}. {HERMES} expands to HERMES below.
+# sireum-kanban.conf on hermes-host — for Hermes v0.22.7+ (`hermes kanban --help`).
+# Placeholders: {card} {ttl} {text}. {HERMES} expands to HERMES below.
 HERMES=/home/hermes/.local/bin/hermes
-LIST_JSON={HERMES} kanban list --tag remote --format json
-SHOW_JSON={HERMES} kanban show {card} --format json
-TAG_ADD={HERMES} kanban tag {card} --add {tag}
-TAG_REMOVE={HERMES} kanban tag {card} --remove {tag}
-COMMENT={HERMES} kanban comment {card} --author sireum --file {text_file}
-COMPLETE={HERMES} kanban move {card} done
-REQUEST_REVIEW={HERMES} kanban move {card} review
-BLOCK={HERMES} kanban move {card} blocked
-# Field names in the JSON that LIST_JSON / SHOW_JSON print.
-F_ID=id
-F_TITLE=title
-F_BODY=description
-F_TAGS=tags
-F_TAGGED_BY=tagged_by
-F_CREATED=created_at
+HERMES_HOME=/home/hermes/.hermes
+MARKER=Sireum: remote
+CLAIM_TTL=7200
+
+LIST_JSON={HERMES} kanban list --json
+SHOW_JSON={HERMES} kanban show {card} --json
+CLAIM={HERMES} kanban claim {card} --ttl {ttl}
+COMMENT={HERMES} kanban comment {card} --author sireum -- {text}
+COMPLETE={HERMES} kanban complete {card} --force --result={text}
+REQUEST_REVIEW={HERMES} kanban request-review {card} --force --summary={text}
+BLOCK={HERMES} kanban block {card} --kind needs_input -- {text}
+RECLAIM={HERMES} kanban reclaim {card} --reason={text}
+EDIT_BODY={HERMES} kanban edit {card} --body={text}
+
+# Opt-in marker is a body line. Optional body directives:
+#   Repo: <alias>       Executor: auto|claude|opencode      Test: <target>
+#   Base: <ref>         Timeout: <minutes>                  Class: standard|browser|heavy

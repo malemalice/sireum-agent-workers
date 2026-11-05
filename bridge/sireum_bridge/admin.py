@@ -287,7 +287,10 @@ def connect_hermes(ctx: Ctx, args) -> int:
     m = re.fullmatch(r"(?:([A-Za-z0-9._-]+)@)?([A-Za-z0-9._-]+)", target)
     if not m:
         raise SystemExit("target must be user@host or host")
-    host = m[2]
+    ssh_user, host = m[1], m[2]
+    kanban_user = getattr(args, "kanban_user", None) or ssh_user or "sireum"
+    hermes_bin = getattr(args, "hermes_bin", None) or f"/home/{kanban_user}/.hermes/hermes-agent/venv/bin/hermes"
+    hermes_home = getattr(args, "hermes_home", None) or f"/home/{kanban_user}/.hermes"
     key = ctx.secrets / "kanban_ed25519"
     pub = (key.with_suffix(".pub")).read_text().strip() if key.with_suffix(".pub").exists() else None
     if not pub:
@@ -305,28 +308,33 @@ def connect_hermes(ctx: Ctx, args) -> int:
     ctx.run(["ssh", *ssh_opts, target, f"rm -rf {remote_tmp} && mkdir -p {remote_tmp}"], user=op)
     ctx.run(["scp", "-q", *(["-P", str(args.port)] if args.port else []), *files, f"{target}:{remote_tmp}/"],
             user=op)
-    ctx.run(["ssh", "-t", *ssh_opts, target,
-             f"sudo bash {remote_tmp}/install-on-hermes-host.sh {shlex.quote(pub)}; rm -rf {remote_tmp}"], user=op)
+    install_args = " ".join(shlex.quote(x) for x in (pub, kanban_user, hermes_bin, hermes_home))
+    if getattr(args, "local", False):
+        ctx.run(["ssh", *ssh_opts, target,
+                 f"bash {remote_tmp}/install-on-hermes-host.sh --local {install_args}; rm -rf {remote_tmp}"], user=op)
+    else:
+        ctx.run(["ssh", "-t", *ssh_opts, target,
+                 f"sudo bash {remote_tmp}/install-on-hermes-host.sh {install_args}; rm -rf {remote_tmp}"], user=op)
 
     print("==> Testing the restricted key (accepting hermes-host's SSH host key on first use)")
     test = ["ssh", "-i", str(key), "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
-            "-o", "StrictHostKeyChecking=accept-new", *ssh_opts, f"sireum@{host}", "list-remote"]
+            "-o", "StrictHostKeyChecking=accept-new", *ssh_opts, f"{kanban_user}@{host}", "list-remote"]
     p = ctx.run(test, user=ctx.service_user or None, capture_output=True, text=True, check=False)
     if p.returncode != 0:
         print(f"list-remote failed ({p.returncode}): {(p.stderr or '').strip()[:300]}", file=sys.stderr)
-        print("Most likely the hermes kanban commands in /etc/sireum-kanban.conf on hermes-host need adjusting "
-              "(compare with `hermes kanban --help`). The bridge was not changed.", file=sys.stderr)
+        print("Most likely the hermes kanban commands in the sireum-kanban config on hermes-host need "
+              "adjusting (compare with `hermes kanban --help`). The bridge was not changed.", file=sys.stderr)
         return 1
     try:
         n = len(json.loads(p.stdout or "[]"))
-        print(f"list-remote OK ({n} card(s) tagged remote right now)")
+        print(f"list-remote OK ({n} card(s) opted in right now)")
     except ValueError:
         if not ctx.dry_run:
             print("list-remote returned non-JSON; check /etc/sireum-kanban.conf on hermes-host", file=sys.stderr)
             return 1
 
     port = f" -p {args.port}" if args.port else ""
-    source = f"kanban-ssh:sireum@{host}#{key}"
+    source = f"kanban-ssh:{kanban_user}@{host}#{key}"
     set_env(ctx, {"SOURCE": source, "REMOTE_TAGGERS": taggers})
     if port:
         print(f"note: non-standard SSH port; add `Port {args.port}` for {host} to the service user's ~/.ssh/config")
