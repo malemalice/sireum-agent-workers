@@ -1,0 +1,28 @@
+{
+  "job_id": "kb-01HXYZEXAMPLE",
+  "source": "kanban",
+  "source_ref": "card:01HXYZEXAMPLE",
+  "git_host": "github-adaptiv",
+  "repo": "adaptiv/example",
+  "base_ref": "main",
+  "task": "Fix the login redirect loop.",
+  "acceptance": "Auth test target passes; no change to the public API.",
+  "test_target": "auth",
+  "executor": "auto",
+  "model": "default",
+  "timeout_sec": 1800,
+  "max_turns": 40,
+  "max_cost_usd": null,
+  "job_class": "standard",
+  "toolbox": "base",
+  "tools_manifest": ".agent/tools.yaml",
+  "prepare_timeout_sec": 900,
+  "branch": "agent/kb-01HXYZEXAMPLE",
+  "idempotency_key": "kb-01HXYZEXAMPLE",
+  "labels": ["code", "repo:example"],
+  "callback": {
+    "kanban_card": "01HXYZEXAMPLE",
+    "discord_webhook": "default"
+  },
+  "created_at": "2026-11-05T14:00:00+07:00"
+}

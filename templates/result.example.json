@@ -1,0 +1,30 @@
+{
+  "job_id": "kb-01HXYZEXAMPLE",
+  "lease_id": "ls-7f3a",
+  "attempt": 1,
+  "executor": "claude",
+  "status": "success",
+  "exit_code": 0,
+  "branch": "agent/kb-01HXYZEXAMPLE",
+  "commit": "a1b2c3d",
+  "bundle_uploaded": true,
+  "mr_url": null,
+  "test_result": {
+    "ran": true,
+    "passed": true,
+    "target": "auth",
+    "command": "pytest -q tests/auth"
+  },
+  "tests_modified": false,
+  "summary": "Fixed redirect loop in auth middleware; added a regression test.",
+  "logs_url": "https://sireum-hub.<tailnet>.ts.net/runs/kb-01HXYZEXAMPLE",
+  "usage": {
+    "turns": 9,
+    "input_tokens": 41000,
+    "output_tokens": 3200,
+    "cost_usd": null
+  },
+  "started_at": "2026-11-05T14:01:00+07:00",
+  "finished_at": "2026-11-05T14:09:00+07:00",
+  "error": null
+}
