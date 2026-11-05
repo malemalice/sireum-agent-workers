@@ -59,11 +59,16 @@ EOF
       sudo SIREUM_HOST_OS=macos bash /tmp/sireum/install/install-env.sh '$JOIN_CODE'"
 
     say "Installing the 'sireum' command on this Mac"
-    sudo install -m 0755 /dev/stdin /usr/local/bin/sireum <<'EOF'
+    # BSD install(1) on macOS can't read a pipe; stage via a file.
+    tmp=$(mktemp)
+    cat > "$tmp" <<'EOF'
 #!/usr/bin/env bash
 # Forwards to the sireum helper inside the Lima VM.
-exec limactl shell sireum -- sudo sireum "$@"
+exec limactl shell --workdir / sireum -- sudo sireum "$@"
 EOF
+    sudo install -d -m 0755 /usr/local/bin
+    sudo install -m 0755 "$tmp" /usr/local/bin/sireum
+    rm -f "$tmp"
 
     say "Seat tokens"
     echo "Sireum needs a Claude token for this PC (it uses your Claude Max plan)."

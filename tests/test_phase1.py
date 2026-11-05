@@ -133,6 +133,19 @@ for _name in [n for n in dir(test_e2e.E2E) if n.startswith("test_")]:
 
 
 class Enrollment(test_e2e.E2E):
+    ENV = {"REGISTRY_USERNAME": "puller", "REGISTRY_PASSWORD": "ghp_readonly",
+           # As left by `set -a; . bridge.env` / systemd EnvironmentFile (quotes stripped).
+           "NOMAD_SERVERS": "[100.64.0.1:4647, 100.64.0.2:4647]"}
+
+    @classmethod
+    def start_bridge(cls):
+        os.environ.update(cls.ENV)
+        try:
+            super().start_bridge()
+        finally:
+            for k in cls.ENV:
+                os.environ.pop(k)
+
     def hub(self, *args):
         env = {**os.environ, "PYTHONPATH": str(ROOT / "bridge"), "BRIDGE_PUBLIC_URL": self.url}
         return subprocess.run([sys.executable, "-m", "sireum_bridge", "--state", str(self.state), *args],
@@ -149,6 +162,8 @@ class Enrollment(test_e2e.E2E):
         c, r = self.call("POST", "/v1/nodes/enroll", info, token=j["enroll_token"])
         self.assertEqual(c, 200, r)
         self.assertEqual(r["node_name"], "mbp-m2")
+        self.assertEqual(r["nomad_servers"], ["100.64.0.1:4647", "100.64.0.2:4647"])
+        self.assertEqual(r["registry_auth"], {"server": "ghcr.io", "username": "puller", "password": "ghp_readonly"})
         self.assertEqual(self.call("POST", "/v1/nodes/enroll", info, token=j["enroll_token"])[0], 401)
         name, secret = r["node_name"], r["node_secret"]
         self.assertEqual(self.call("PUT", f"/v1/nodes/{name}/seats", {"claude_token": "x"}, token="bad")[0], 401)

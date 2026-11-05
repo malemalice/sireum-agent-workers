@@ -105,7 +105,7 @@ licence cost, kanban + Discord as UI.
 | Lima | Apache-2.0 | $0 |
 | squid | GPL-2.0 | $0 |
 | CNCF distribution, SQLite | Apache-2.0 / public domain | $0 |
-| Tailscale (hosted) | free personal tier | $0 within plan limits |
+| Tailscale (hosted) | Personal plan is non-commercial only; Standard for business use | $0 (Personal) or $8/user/month (Standard); tagged devices free up to 50 |
 | Docker Desktop | free for small businesses (< 250 staff and < $10M revenue) | not used — Linux env instead |
 | Claude Max | consumer subscription | existing |
 | OpenCode Go | subscription (~$10/month, dollar-metered caps) | existing |

@@ -110,7 +110,8 @@ class Nodes:
                  h(secret), accessor, time.time()))
         return 200, {"node_name": name, "node_secret": secret, "nomad_client_token": nomad_token,
                      **{k: self.settings.get(k) for k in
-                        ("nomad_servers", "nomad_version", "runner_image", "squid_image", "registry")}}
+                        ("nomad_servers", "nomad_version", "runner_image", "squid_image", "registry",
+                         "registry_auth")}}
 
     def auth_node(self, name: str, secret: str) -> bool:
         row = self.store.db.execute("SELECT secret_hash FROM nodes WHERE name=? AND revoked=0", (name,)).fetchone()

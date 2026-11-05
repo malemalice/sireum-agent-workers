@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build the runner images for linux/amd64 + linux/arm64 and push them to the hub registry.
 #
-#   REGISTRY=sireum-hub.<tailnet>.ts.net:5000 scripts/build-images.sh [base|browser|all]
+#   REGISTRY=ghcr.io/<org> scripts/build-images.sh [base|browser|all]   (docker login ghcr.io first)
+#   REGISTRY=sireum-hub.<tailnet>.ts.net:5000 scripts/build-images.sh   (Linux hub's own registry)
 #   LOCAL=1 scripts/build-images.sh base      # this machine's arch only, loaded into Docker
 #
 # Prints each pushed image's multi-arch index digest — put the base one in RUNNER_IMAGE
@@ -21,10 +22,18 @@ build() {  # build <name> <dockerfile>
   fi
   : "${REGISTRY:?set REGISTRY=sireum-hub.<tailnet>.ts.net:5000 (or LOCAL=1)}"
   local ref="$REGISTRY/sireum-runner:$name-$TAG_SUFFIX"
-  docker buildx inspect sireum-builder >/dev/null 2>&1 || \
-    docker buildx create --name sireum-builder --driver docker-container \
-      --driver-opt network=host --config <(printf '[registry."%s"]\n  http = true\n  insecure = true\n' "$REGISTRY") >/dev/null
-  docker buildx build --builder sireum-builder --platform "$PLATFORMS" -f "$file" -t "$ref" \
+  # The Linux hub's own registry is plain HTTP on the tailnet; GHCR and others are HTTPS.
+  if [[ -n "${INSECURE:-}" || "$REGISTRY" == *.ts.net:* ]]; then
+    docker buildx inspect sireum-builder-http >/dev/null 2>&1 || \
+      docker buildx create --name sireum-builder-http --driver docker-container \
+        --driver-opt network=host --config <(printf '[registry."%s"]\n  http = true\n  insecure = true\n' "${REGISTRY%%/*}") >/dev/null
+    BUILDER=sireum-builder-http
+  else
+    docker buildx inspect sireum-builder >/dev/null 2>&1 || \
+      docker buildx create --name sireum-builder --driver docker-container >/dev/null
+    BUILDER=sireum-builder
+  fi
+  docker buildx build --builder "$BUILDER" --platform "$PLATFORMS" -f "$file" -t "$ref" \
     -t "$REGISTRY/sireum-runner:$name" --push .
   local digest
   digest=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest.Digest}}' | tr -d '"')

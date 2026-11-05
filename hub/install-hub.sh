@@ -18,6 +18,7 @@ ENV_FILE=$SECRETS/bridge.env
 
 say()  { printf '\n==> %s\n' "$*"; }
 fail() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
+[[ "$(uname -s)" == Linux ]] || fail "this installer is for Linux. On a Mac run (without sudo): ./hub/install-hub-macos.sh"
 [[ $EUID -eq 0 ]] || fail "run as root"
 . /etc/os-release
 [[ "$ID" == ubuntu || "$ID" == debian ]] || fail "Ubuntu or Debian required"

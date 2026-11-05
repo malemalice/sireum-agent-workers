@@ -162,3 +162,10 @@ Runner image pinned by digest, multi-arch, CLIs pinned by npm version, no
   real worker; the bridge never accepts `fake` as an executor.
 - The `sireum` user on `hermes-host` needs a real shell (`/bin/bash`), not `nologin`:
   sshd runs the forced command through the user's shell.
+- **Registry pull token on workers (macOS hub / external registry).** Enrolled workers get
+  a read-only registry token (`read:packages` only) and keep it in
+  `/root/.docker/config.json` (0600) inside the Linux env. It can pull the runner image and
+  nothing else; rotate it in `bridge.env` and re-enrol or re-login workers if a PC is lost.
+  Alternative: make the image public and leave `REGISTRY_USERNAME` empty.
+- `NOMAD_SERVERS` is a comma-separated list; the bridge also tolerates `[a,b]` because
+  `bash` and systemd strip quotes from env files.

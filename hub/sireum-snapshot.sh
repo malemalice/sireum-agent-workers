@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Daily: Nomad snapshot + bridge DB copy, then ship off the hub. Cron:  15 3 * * *  root  /opt/sireum/src/hub/sireum-snapshot.sh
 set -euo pipefail
-. /srv/sireum/secrets/bridge.env
-OUT=/srv/sireum/backups; mkdir -p "$OUT"; chmod 0700 "$OUT"
+H="${SIREUM_HOME:-/srv/sireum}"   # /opt/sireum on a macOS hub
+. "$H/secrets/bridge.env"
+OUT="$H/backups"; mkdir -p "$OUT"; chmod 0700 "$OUT"
 TS=$(date +%Y%m%d-%H%M)
 NOMAD_ADDR="$NOMAD_ADDR" NOMAD_TOKEN="${NOMAD_MGMT_TOKEN:-$NOMAD_TOKEN}" nomad operator snapshot save "$OUT/nomad-$TS.snap"
-sqlite3 /srv/sireum/state/state.db ".backup '$OUT/state-$TS.db'"
+sqlite3 "$H/state/state.db" ".backup '$OUT/state-$TS.db'"
 find "$OUT" -type f -mtime +14 -delete
 # Off-host copy (set OFFSITE, e.g. user@nas:/backups/sireum or an rclone remote).
 if [[ -n "${OFFSITE:-}" ]]; then

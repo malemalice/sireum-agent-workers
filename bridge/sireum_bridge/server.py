@@ -24,6 +24,7 @@ import yaml
 
 from .apis import APIError, Nomad, Tailscale
 from .booster import Booster
+from .creds import Resolver
 from .nodes import Nodes
 from .relay import GitHost, Relay, RelayError, Repo
 from .sources import SourceError, make_source
@@ -87,13 +88,14 @@ class Bridge:
         self.claim_grace = parse_duration(env.get("CLAIM_GRACE"), 600)
         self.poll_interval = parse_duration(env.get("POLL_INTERVAL"), 30)
 
-        hosts_doc = yaml.safe_load((config_dir / "git_hosts.yaml").read_text()) or {}
-        repos_doc = yaml.safe_load((config_dir / "repos.yaml").read_text()) or {}
-        self.hosts = {h["id"]: GitHost(**h) for h in hosts_doc.get("hosts", [])}
-        self.repos = [Repo(**r) for r in repos_doc.get("repos", [])]
+        self.config_dir = config_dir
+        self._config_mtimes: tuple = ()
+        self.hosts: dict[str, GitHost] = {}
+        self.repos: list[Repo] = []
+        self.load_config(initial=True)
         state_dir.mkdir(parents=True, exist_ok=True)
         self.store = Store(str(state_dir / "state.db"))
-        self.relay = Relay(state_dir, self.hosts, int(env.get("BUNDLE_MAX_MB", "50")))
+        self.relay = Relay(state_dir, self.hosts, int(env.get("BUNDLE_MAX_MB", "50")), Resolver())
         self.runs_dir = state_dir / "runs"
         self.runs_dir.mkdir(exist_ok=True)
 
@@ -101,25 +103,63 @@ class Bridge:
               if env.get("TS_OAUTH_CLIENT_ID") and env.get("TS_OAUTH_CLIENT_SECRET") else None)
         servers = env.get("NOMAD_SERVERS", "")
         self.nodes = Nodes(self.store, state_dir, self.nomad, ts, self.public_url, {
-            "nomad_servers": json.loads(servers) if servers.startswith("[") else
-                             [x.strip() for x in servers.split(",") if x.strip()],
+            # Comma-separated; also tolerates ["a","b"] after shell/systemd quote stripping.
+            "nomad_servers": [x.strip().strip('"\'') for x in servers.strip("[] ").split(",")
+                              if x.strip().strip('"\'')],
             "nomad_version": env.get("NOMAD_VERSION", ""),
             "runner_image": env.get("RUNNER_IMAGE", ""),
             "squid_image": env.get("SQUID_IMAGE", ""),
             "registry": env.get("REGISTRY", ""),
+            "registry_auth": ({"server": env.get("REGISTRY_SERVER") or "ghcr.io",
+                               "username": env["REGISTRY_USERNAME"], "password": env["REGISTRY_PASSWORD"]}
+                              if env.get("REGISTRY_USERNAME") and env.get("REGISTRY_PASSWORD") else None),
         })
         source = make_source(env.get("SOURCE", ""))
         taggers = {t.strip() for t in env.get("REMOTE_TAGGERS", "").split(",") if t.strip()}
         self.booster = Booster(self, source, taggers, self.claim_grace) if source else None
 
     # -- lookups ----------------------------------------------------------
+    def load_config(self, initial: bool = False) -> bool:
+        """(Re)load git_hosts.yaml + repos.yaml when they change. A bad edit keeps the old config."""
+        files = [self.config_dir / "git_hosts.yaml", self.config_dir / "repos.yaml"]
+        try:
+            mtimes = tuple(f.stat().st_mtime_ns for f in files)
+        except OSError as e:
+            if initial:
+                raise SystemExit(f"config missing: {e}")
+            return False
+        if mtimes == self._config_mtimes:
+            return False
+        try:
+            hosts_doc = yaml.safe_load(files[0].read_text()) or {}
+            repos_doc = yaml.safe_load(files[1].read_text()) or {}
+            hosts = {h["id"]: GitHost(**h) for h in hosts_doc.get("hosts") or []}
+            repos = [Repo(**r) for r in repos_doc.get("repos") or []]
+        except (yaml.YAMLError, TypeError, KeyError) as e:
+            if initial:
+                raise SystemExit(f"bad config: {e}")
+            log.error("config reload failed, keeping the previous config: %s", e)
+            self._config_mtimes = mtimes
+            return False
+        self.hosts.clear()
+        self.hosts.update(hosts)          # Relay holds the same dict object
+        self.repos = repos
+        self._config_mtimes = mtimes
+        if not initial:
+            self.relay.creds.invalidate()
+            log.info("config reloaded: hosts=%s repos=%s", ",".join(hosts),
+                     ",".join(r.alias for r in repos if r.enabled))
+        return True
+
     def resolve_repo(self, ref: str) -> Repo | None:
+        self.load_config()
         for r in self.repos:
             if ref == r.alias or ref == f"{r.git_host}/{r.path}":
                 return r if (r.enabled and r.git_host in self.hosts) else None
         return None
 
     def repo_by_alias(self, alias: str) -> Repo:
+        self.load_config()
         return next(r for r in self.repos if r.alias == alias)
 
     def executor_available(self, name: str) -> bool:

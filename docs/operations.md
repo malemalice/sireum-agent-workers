@@ -12,6 +12,25 @@ Nomad job, snapshot / disk-alert / `git gc` crons, the kanban SSH key, and the
 `sireum-hub` wrapper), then prints the manual steps. The hand-written steps are kept
 for reference.
 
+**Hub on macOS (native):** `./hub/install-hub-macos.sh` as your user. Requires Tailscale
+(with its CLI), Xcode command line tools (git, python3 ≥ 3.9). It:
+
+- installs everything under `/opt/sireum` (`src`, `venv`, `bin/nomad`, `bridge/` config,
+  `state/`, `secrets/` 0700, `logs/`, `backups/`), owned by your user;
+- downloads Nomad 2.1.1 for darwin and checks its SHA-256; binds Nomad to the tailnet IP
+  (re-run the script if that IP changes);
+- bootstraps Nomad ACLs and policies, writes `secrets/bridge.env`, registers the runner job
+  once `RUNNER_IMAGE` is set;
+- LaunchDaemons (start at boot, run as your user): `id.sireum.nomad`, `id.sireum.bridge`,
+  `id.sireum.snapshot` (03:15), `id.sireum.disk-alert` (15 min), `id.sireum.git-gc`
+  (Sunday 04:00), and `id.sireum.awake` (`caffeinate -s`); log rotation via newsyslog;
+- `tailscale serve --https=443` → bridge; `sireum-hub` and `sireum-hub-uninstall [--purge]`.
+
+No local registry: push the runner image to a private GHCR package and put a **read-only**
+(`read:packages`) token in `REGISTRY_USERNAME` / `REGISTRY_PASSWORD`; workers receive it at
+enrolment and `docker login` with it (Nomad's docker plugin uses the same auth file).
+Restart the bridge after config changes: `sudo launchctl kickstart -k system/id.sireum.bridge`.
+
 ```bash
 # Nomad server
 sudo install -m 0755 nomad /usr/local/bin/nomad

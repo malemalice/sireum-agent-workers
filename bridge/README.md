@@ -19,6 +19,7 @@
 Extra env beyond the table below: `SOURCE` (`kanban-ssh:user@host#keyfile`,
 `github:owner/repo#tokenfile`, `file:path`), `NOMAD_SERVERS`, `NOMAD_VERSION`,
 `NOMAD_NODE_TOKEN`, `NOMAD_MINT_NODE_TOKENS`, `RUNNER_IMAGE`, `SQUID_IMAGE`, `REGISTRY`,
+`REGISTRY_SERVER` / `REGISTRY_USERNAME` / `REGISTRY_PASSWORD` (read-only pull token for workers),
 `TS_OAUTH_CLIENT_ID` / `TS_OAUTH_CLIENT_SECRET` / `TS_TAILNET`, `LEASE_TTL_SEC`,
 `RECONCILE_INTERVAL`. Template: `hub/bridge.env.example`.
 

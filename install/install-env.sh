@@ -76,6 +76,9 @@ NODE_SECRET="$(jq -r .node_secret <<<"$ENROLL")"
 export RUNNER_IMAGE="$(jq -r .runner_image <<<"$ENROLL")"
 export SQUID_IMAGE="$(jq -r .squid_image <<<"$ENROLL")"
 REGISTRY="$(jq -r '.registry // empty' <<<"$ENROLL")"
+REG_SERVER="$(jq -r '.registry_auth.server // empty' <<<"$ENROLL")"
+REG_USER="$(jq -r '.registry_auth.username // empty' <<<"$ENROLL")"
+REG_PASS="$(jq -r '.registry_auth.password // empty' <<<"$ENROLL")"
 
 # The hub registry is plain HTTP inside the tailnet (WireGuard-encrypted).
 if [[ -n "$REGISTRY" ]]; then
@@ -89,6 +92,22 @@ d["insecure-registries"] = sorted(regs)
 json.dump(d, open(p, "w"), indent=2)
 PY
   systemctl restart docker
+fi
+
+# Private external registry (e.g. GHCR): read-only pull token from the hub.
+DOCKER_AUTH_HCL=""
+if [[ -n "$REG_USER" && -n "$REG_PASS" ]]; then
+  say "Logging in to $REG_SERVER (read-only pull token)"
+  printf '%s' "$REG_PASS" | docker login "$REG_SERVER" -u "$REG_USER" --password-stdin >/dev/null
+  chmod 0600 /root/.docker/config.json
+  DOCKER_AUTH_HCL='
+plugin "docker" {
+  config {
+    auth {
+      config = "/root/.docker/config.json"
+    }
+  }
+}'
 fi
 
 # 5. Nomad (HashiCorp apt repo, pinned version from the hub)
@@ -127,6 +146,7 @@ client {
 acl {
   enabled = true
 }
+${DOCKER_AUTH_HCL}
 EOF
 umask 077
 printf 'NOMAD_TOKEN=%s\n' "$NOMAD_TOKEN" > /etc/sireum/nomad.env

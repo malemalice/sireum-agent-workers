@@ -12,8 +12,10 @@ import os
 import subprocess
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+from .creds import SOURCES, CredentialError, Resolver, git_auth_env
 
 
 class RelayError(Exception):
@@ -24,18 +26,26 @@ class RelayError(Exception):
         self.code = code
 
 
+def _auth_of(obj) -> dict:
+    return {k: getattr(obj, k) for k in (*SOURCES, "cache_sec") if getattr(obj, k, None)}
+
+
 @dataclass
 class GitHost:
     id: str
     type: str  # github | gitlab | gitea | generic | local
     git_url: str
     api_url: str | None = None
+    # Exactly one credential source (see creds.py): file, env, command, or GitHub App.
     api_key_file: str | None = None
+    api_key_env: str | None = None
+    api_key_cmd: list | str | None = None
+    github_app: dict | None = None
+    cache_sec: int | None = None
 
-    def api_key(self) -> str | None:
-        if not self.api_key_file:
-            return None
-        return Path(self.api_key_file).read_text().strip()
+    @property
+    def auth(self) -> dict:
+        return _auth_of(self)
 
     def remote_url(self, path: str) -> str:
         if self.type == "local":
@@ -51,6 +61,16 @@ class Repo:
     path: str
     default_branch: str = "main"
     enabled: bool = False
+    # Optional per-repo credential, overriding the host's (same keys as GitHost).
+    api_key_file: str | None = None
+    api_key_env: str | None = None
+    api_key_cmd: list | str | None = None
+    github_app: dict | None = None
+    cache_sec: int | None = None
+
+    @property
+    def auth(self) -> dict:
+        return _auth_of(self)
 
     @property
     def key(self) -> str:
@@ -71,32 +91,27 @@ def git(*args: str, cwd: str | Path | None = None, env: dict | None = None,
     return proc
 
 
-def _auth_env(host: GitHost) -> dict:
-    """Pass the API key as an HTTP header via env-only git config (never argv, never on disk)."""
-    key = host.api_key()
-    if not key or host.type == "local":
-        return {}
-    if host.type == "github":
-        import base64
-        cred = base64.b64encode(f"x-access-token:{key}".encode()).decode()
-        header = f"Authorization: Basic {cred}"
-    elif host.type == "gitlab":
-        import base64
-        cred = base64.b64encode(f"oauth2:{key}".encode()).decode()
-        header = f"Authorization: Basic {cred}"
-    else:  # gitea / generic: token as bearer
-        header = f"Authorization: token {key}"
-    return {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.extraHeader",
-            "GIT_CONFIG_VALUE_0": header}
-
-
 class Relay:
-    def __init__(self, root: Path, hosts: dict[str, GitHost], bundle_max_mb: int = 50):
+    def __init__(self, root: Path, hosts: dict[str, GitHost], bundle_max_mb: int = 50,
+                 resolver: Resolver | None = None):
         self.root = Path(root)
         self.hosts = hosts
+        self.creds = resolver or Resolver()
         self.bundle_max = bundle_max_mb * 1024 * 1024
         (self.root / "git").mkdir(parents=True, exist_ok=True)
         (self.root / "bundles").mkdir(parents=True, exist_ok=True)
+
+    def token(self, repo: Repo) -> str | None:
+        host = self.hosts[repo.git_host]
+        if host.type == "local":
+            return None
+        try:
+            return self.creds.token(repo.auth or host.auth, host.api_url, repo.path)
+        except CredentialError as e:
+            raise RelayError(f"credentials for {repo.git_host}/{repo.path}: {e}", 502) from None
+
+    def _env(self, repo: Repo) -> dict:
+        return git_auth_env(self.hosts[repo.git_host].type, self.token(repo))
 
     def mirror_path(self, repo: Repo) -> Path:
         return self.root / "git" / f"{repo.key}.git"
@@ -113,7 +128,7 @@ class Relay:
                          ("gc.auto", "0")):
                 git("config", k, v, cwd=mirror)
         git("fetch", "--prune", "--quiet", host.remote_url(repo.path),
-            "+refs/heads/*:refs/heads/*", cwd=mirror, env=_auth_env(host))
+            "+refs/heads/*:refs/heads/*", cwd=mirror, env=self._env(repo))
         return mirror
 
     def resolve(self, repo: Repo, ref: str) -> str:
@@ -159,14 +174,16 @@ class Relay:
         mirror = self.mirror_path(repo)
         p = git("push", "--quiet", "--porcelain", host.remote_url(repo.path),
                 f"refs/sireum/incoming/{job_id}:refs/heads/{branch}",
-                cwd=mirror, env=_auth_env(host), check=False)
+                cwd=mirror, env=self._env(repo), check=False)
         if p.returncode != 0:
             raise RelayError("push rejected: " + p.stderr.decode(errors="replace").strip(), 409)
         return branch
 
     def open_mr(self, repo: Repo, branch: str, title: str, body: str) -> str | None:
         host = self.hosts[repo.git_host]
-        key = host.api_key()
+        if host.type in ("local", "generic"):
+            return None
+        key = self.token(repo)
         if host.type == "github":
             owner_repo = repo.path
             url = f"{host.api_url.rstrip('/')}/repos/{owner_repo}/pulls"

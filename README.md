@@ -319,6 +319,13 @@ sudo ./hub/install-hub.sh          # Nomad server + ACLs, registry, bridge, cron
 REGISTRY=<hub>.ts.net:5000 scripts/build-images.sh   # push the runner images
 ```
 
+**Hub on a Mac:** run `./hub/install-hub-macos.sh` as your user (it asks for sudo when
+needed). It runs natively — no VM, no Docker: Nomad server (pinned binary), the bridge in a
+Python venv, `tailscale serve` for HTTPS, all as LaunchDaemons under `/opt/sireum`. The
+runner image goes to a private registry such as GHCR (`REGISTRY=ghcr.io/<org>
+scripts/build-images.sh`); workers get a read-only pull token when they enrol. Use a Mac
+that stays on (e.g. a Mac mini); a sleeping hub pauses Sireum.
+
 The installer prints the remaining manual steps (git host keys, kanban key, Tailscale ACL).
 See [`docs/operations.md`](docs/operations.md) §1.
 

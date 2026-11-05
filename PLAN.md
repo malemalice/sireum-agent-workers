@@ -38,7 +38,7 @@ fleet switched off, Hermes behaves exactly as it does today.
 | R6 | Capacity/backlog aware | Nomad scheduler + **configurable per-executor limits (default unlimited)** |
 | R7 | Workspace/cache reuse | hub mirror + worker mirror + worktree |
 | R8 | Source-agnostic: any git host by **URL + API key** | git relay on the hub |
-| R9 | Zero licence cost | Nomad CE, Docker Engine, Lima/WSL2, squid, OSS |
+| R9 | Zero licence cost (Tailscale: see note) | Nomad CE, Docker Engine, Lima/WSL2, squid, OSS. **Tailscale's free Personal plan is "only suitable for non-commercial use"; business use is Standard at $8/user/month (tagged devices don't add seats).** |
 | R10 | Do not reinvent | Nomad owns placement/queue/isolation |
 | R11 | Reproducible runtime tools | toolbox images + `.agent/tools.yaml` |
 | R12 | Booster, not dependency | opt-in tag, claim grace, fallback to Hermes |
@@ -220,6 +220,7 @@ git host; nothing has run on real hardware yet.
 | `sireum-kanban` forced command | ✓ | against a fake `hermes` CLI | **match the command templates to the real CLI** |
 | Enrollment: `sireum-hub invite`, enroll / seats / leave | ✓ | tests (no Tailscale/Nomad) | Tailscale OAuth key minting, Nomad Variables |
 | Hub installer (`hub/install-hub.sh`), Nomad server + ACL policies, crons | ✓ | syntax only | run on the hub PC |
+| Native macOS hub (`hub/install-hub-macos.sh`) + GHCR pull auth | ✓ | bash 3.2 syntax, launchd plists lint, bridge + enrol on macOS Python 3.9, 27 tests on 3.9 and 3.13 | run on the hub Mac; GHCR package + tokens |
 | Worker installers (`install/`) | updated | syntax only | MBP (Lima), one Windows PC |
 | Prepare step + `:browser` image (Phase 3) | ✓ | 4 prepare tests | build `:browser` (skipped here: low disk) |
 | GitHub Issues source + GitHub/GitLab/Gitea MR adapters (Phase 4) | ✓ | fake-API tests | real APIs |
@@ -267,6 +268,90 @@ git host; nothing has run on real hardware yet.
 ### Phase 4 — more sources and hosts
 - Notion/Jira/GitHub Issues adapters; more git host adapters (Gitea, generic push-only).
 
+### Phase 1.5 — simplified operator setup (in progress)
+Goal: after the hub install, the operator's only manual work is the Claude Code /
+OpenCode seat tokens on each worker.
+- No registry: the hub serves the runner source; each worker builds the image whose tag
+  matches the hub (`sireum-runner:local-<hash>`); installers copy the local repo instead
+  of downloading a tarball; `sireum rebuild` after hub updates.
+- Join codes without Tailscale OAuth: the worker installer runs `tailscale up` and the user
+  clicks the login link.
+- `sireum-hub add-repo owner/repo`: snapshot of `gh auth token` into a 0600 file, detects
+  the default branch, checks push permission and branch protection (offers to protect),
+  writes `repos.yaml`; applied by hot-reload (no restart).
+- `sireum-hub connect-hermes user@hermes-host --taggers …`: installs `sireum-kanban` over
+  SSH, accepts the host key, sets `SOURCE` / `REMOTE_TAGGERS`, restarts the bridge.
+- Deferred (optional): Tailscale ACL, `OFFSITE` backups.
+- Built so far (uncommitted): credential resolver (`bridge/sireum_bridge/creds.py`) and
+  config hot-reload.
+
+### Phase 6 — credentials, packages, secrets, access requests
+Principle (industry practice): short-lived, least-privilege credentials held by the hub;
+workers and the agent see as little as possible; a repo **requests** access in its
+manifest and the operator **approves** it in `repos.yaml`; a job only receives the
+intersection. Every credential uses one pluggable source: `api_key_file`, `api_key_env`,
+`api_key_cmd` (gh, 1Password `op`, Vault, Keychain, pass), or `github_app`.
+
+6a. **Git credentials** — `gh` snapshot now (Phase 1.5); GitHub App (1-hour per-repo
+    tokens, auto installation lookup) as the target; per-repo overrides.
+6b. **Private packages** — `registries.yaml` with `mode: relay` (hub auth relay; no token
+    on workers; npm, PyPI, Go adapters) or `mode: inject` (token only during prepare,
+    removed before the agent runs); **scoped names** (e.g. `@company/*` never resolves to
+    the public registry — dependency-confusion guard); private git submodules via hub
+    mirror (`url.<hub>.insteadOf`).
+6c. **Test secrets and services** — throwaway service containers per job (Postgres,
+    Redis, MinIO, Mailpit; no real secrets); per-repo secrets with exposure
+    `prepare` (default) / `test` / `agent`; values redacted from logs and results; extra
+    egress hosts per repo only when approved; test-mode/staging credentials only.
+6d. **Access requests** — runner detects missing access (install 401/403/404, squid
+    denials, agent `SIREUM-NEED: <kind> <name> "<reason>"`, missing-env test errors) →
+    `blocked` with `error.code=needs_access` and a structured `needs` list; partial work
+    kept on its branch; card + Discord message with one command each:
+    `sireum-hub needs` / `grant <id>` / `deny <id> "<note>"`; grant writes the per-repo
+    approval and re-runs the job. Pre-flight: the hub compares the manifest's requests
+    with approvals before dispatch and asks first.
+6e. **Maintenance** — `sireum-hub secrets` (inventory: source, repos, last used, exposure;
+    never values), `sireum-hub doctor` (test every credential), expiry warnings 7 days
+    ahead (PAT expiry header; App tokens self-renew), unused-for-60-days warnings,
+    `revoke`, per-job audit of what was granted.
+6f. **Signing** — default: signed at merge (GitHub squash/rebase); per repo: hub SSH
+    signing or GitHub App API commits when every branch must be signed.
+
+Verify: private npm package installs via relay with no token in the job; `@company/*`
+never hits the public registry; a secret with `prepare` exposure is absent during the
+agent phase; a job missing a secret ends `needs_access`, `grant` re-runs it to success;
+`doctor` flags an expired token; audit shows granted names only.
+
+### Phase 7 — hub MCP for Hermes (via Tailscale Funnel)
+Goal: Hermes (or any MCP client) helps operate the hub. Nothing is installed on
+`hermes-host`; the MCP server runs in the bridge on the hub.
+
+- **Transport:** a separate bridge listener (`127.0.0.1:8790`) that serves **only**
+  `/mcp` (MCP streamable HTTP). Published with
+  `tailscale funnel --bg --https=8443 http://127.0.0.1:8790` → `https://<hub>.ts.net:8443/mcp`.
+  The bridge API stays tailnet-only on 443 (Serve); Funnel and Serve can't share a port.
+- **Auth:** per-client bearer token (`sireum-hub mcp-client add hermes --tier operate`),
+  stored hashed; rate limit + lockout after repeated failures; optional source-IP allowlist
+  if Funnel forwards the caller address (verify); every call logged with client id and
+  posted to Discord for operate-tier actions.
+- **Tool tiers:**
+  - *read* — `status`, `runs`, `run_detail`, `nodes`, `needs`, `doctor`, `secrets_inventory`
+    (names/sources/expiry only), `job_log_tail` (redacted).
+  - *operate* — `pause_executor` / `resume_executor`, `drain_node` / `undrain_node`,
+    `cancel_job`, `rerun_job`, `release_card`, `refresh_mirror`.
+  - *sensitive* — `grant` / `deny`, `add_repo`, set/rotate secret, `invite`, `revoke`,
+    remove node: **propose only**. The hub creates a pending action; the operator confirms
+    out of band (`sireum-hub confirm <code>` or a Discord button). Secret values and join
+    codes never pass through MCP.
+- Hermes gets *read* + *operate*. A leaked token can at most read status and pause/resume.
+- Same tools back the CLI, the HTTP API and MCP (one implementation).
+- Depends on: Phase 6d (access requests / pending actions).
+- Verify: Hermes connects over Funnel and lists tools; a wrong token is rejected and
+  locked out; `/v1/*` is unreachable via the Funnel port; a sensitive call only creates a
+  pending action; confirm executes it; no secret value appears in any MCP response or log.
+- To check first: Hermes supports remote MCP servers over HTTP; Funnel caller-IP header;
+  Funnel is beta with unpublished bandwidth limits (MCP traffic is small).
+
 ### Phase 5 — hardening / optional
 - gVisor, OSV scan, private npm/PyPI mirror, `:python`/`:node`, GPU node class.
 
@@ -301,6 +386,8 @@ git host; nothing has run on real hardware yet.
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
+| Tailscale licensing: free Personal plan is non-commercial only; Sireum is internal business tooling | Medium | Low | Move the tailnet to Standard ($8/user/month, ~$8–16/month for 1–2 operators); features used are on all plans |
+| Public MCP endpoint via Funnel (beta) | Medium | Medium | MCP-only listener on 8443; per-client tokens + lockout; read/operate tiers only; sensitive actions propose-then-confirm; no secrets over MCP |
 | Subscription terms: one consumer account used concurrently from several machines | Unknown | High | **Operator accepted** (2026-11-05). Limits configurable; switch to Team/API by config if needed |
 | Usage caps hit with unlimited concurrency | Medium | Medium | Auto-pause + `auto` executor failover + release to Hermes; tune `EXECUTOR_LIMITS` |
 | Sireum consumes the operator's personal quota | Medium | Medium | Visible in `/status`; cap via `EXECUTOR_LIMITS` |
@@ -318,14 +405,20 @@ git host; nothing has run on real hardware yet.
 
 | Question | Owner | Needed by |
 |---|---|---|
-| Which PC is `sireum-hub`? (tentative) | operator | Phase 1 |
+| Which PC is `sireum-hub`? (tentative; may be a Mac → `hub/install-hub-macos.sh`) | operator | Phase 1 |
 | ~~MBP M2 RAM~~ — **8 GB** ⇒ Lima 2 CPU / 4 GB, one `standard` job | operator | Phase 0 ✓ |
 | Sandbox repo + its host for Phase 0 | operator | Phase 0 |
 | Initial `repos.yaml` list (which repos may be boosted) | operator | Phase 1 |
+| Which private registries (npm / PyPI / Go / other) and package scopes? | operator | Phase 6b |
+| Which repos need test secrets, staging access, or signed commits on every branch? | operator | Phase 6c/6f |
+| GitHub App now or later (vs `gh` snapshot)? | operator | Phase 6a |
 | `hermes kanban` atomic claim / tag add-remove? | operator | Phase 1 |
 | Hermes staleness rule for `remote` cards? | operator | Phase 1 |
 | Who may tag `remote`? | operator | Phase 1 |
 | Who reviews agent MRs? | operator | Phase 1 |
+| Does Hermes support remote MCP servers over HTTP (and auth headers)? | operator | Phase 7 |
+| Confirm sensitive MCP actions via CLI only, or also a Discord button (needs a bot)? | operator | Phase 7 |
+| Tailscale plan: stay Personal or move to Standard for business use? | operator | Phase 1 |
 
 ## 16. Decision log
 
@@ -355,3 +448,9 @@ git host; nothing has run on real hardware yet.
 | 2026-11-05 | Hub registry is plain HTTP on the tailnet (`insecure-registries`) | Tailscale serve can't expose :5000 with TLS; traffic is WireGuard-encrypted |
 | 2026-11-05 | Runner fetches hub refs into `refs/remotes/hub/*` | A shared mirror's `fetch --prune` deleted concurrent jobs' local branches (found in tests) |
 | 2026-11-05 | Hermes kanban calls isolated in `/etc/sireum-kanban.conf` templates | Hermes CLI not available to verify; one file to adjust on hermes-host |
+| 2026-11-05 | **Hub MCP over Tailscale Funnel** (MCP-only listener, tiered tools, propose-then-confirm) | Hermes can help operate the hub with nothing installed on `hermes-host`; public exposure limited to a low-privilege MCP surface |
+| 2026-11-05 | **Credentials: one pluggable source model** (file / env / cmd / GitHub App), per host with per-repo override, hot-reloaded | Flexible and rotatable without restarts; secret managers plug in via commands |
+| 2026-11-05 | **Repo requests, operator approves**; job gets the intersection | A card or a branch can't grant itself secrets, registries or egress |
+| 2026-11-05 | **Missing access ⇒ fail fast as `needs_access`, grant, re-run** (no mid-run waiting) | Doesn't hold slots or seats; keeps an explicit approval point (industry norm for agents/CI) |
+| 2026-11-05 | Secrets default to **prepare-only** exposure; private packages via hub relay + scoped names | Keeps secrets out of the agent's reach; blocks dependency confusion |
+| 2026-11-05 | **Native macOS hub** (`hub/install-hub-macos.sh`: launchd, pinned Nomad binary, venv); runner image on **GHCR** with a read-only pull token for workers | Hub may be a Mac; a VM + Docker would cost ~3 GB RAM for a ~200 MB hub. Nomad kept (dropping it was costed and declined) |
