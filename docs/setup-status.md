@@ -5,6 +5,9 @@
 > contents are documented here.
 
 > **Date:** 2026-11-05 (WIB)
+> **Teardown (2026-11-05):** the hub, Nomad server, runner job, seats, bridge,
+> and Hermes-side `sireum-kanban` were removed after this snapshot. The source
+> repo remains; this document is kept as a record.
 > **Scope:** Adaptiv only (not CNT/cinte)
 > **Hub:** `<hub>` (this Mac), Tailscale `<hub-tailnet-ip>`
 > **Hermes:** `hermes-host` (`metallica`), Hermes `v0.22.7`

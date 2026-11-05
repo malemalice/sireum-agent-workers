@@ -2,11 +2,10 @@
 
 > *sireum* (Sundanese: ant) — many small workers carrying tasks together.
 >
-> **Status (2026-11-05):** hub + bridge + Nomad running on the Mac; the Hermes
-> v0.22.7 kanban source is connected and verified (`list-remote` works); Claude and
-> OpenCode seats are stored on the hub; `sireum-runner` is registered. **No worker
-> is enrolled yet** (no Nomad client). Current state, blockers and handoff:
-> [`docs/setup-status.md`](docs/setup-status.md).
+> **Status (2026-11-05):** the hub was set up and verified against Hermes
+> v0.22.7 (kanban source, Claude/OpenCode seats, `sireum-runner` job), then
+> torn down on the same day. The source and handoff notes remain; no worker is
+> currently enrolled. See [`docs/setup-status.md`](docs/setup-status.md).
 > **Owner:** Adaptiv
 
 Sireum is an optional **booster** for the Hermes kanban. A card tagged `remote`
