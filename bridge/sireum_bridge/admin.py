@@ -339,3 +339,190 @@ def runner_image(ctx: Ctx, args) -> int:
     env = read_env(ctx.env_file)
     print(env.get("RUNNER_IMAGE") or runnersrc.local_tag())
     return 0
+
+
+# -- Phase 6: access requests, registries, inventory, health ----------------------
+
+def bridge_api(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
+    base = os.environ.get("BRIDGE_LOCAL_URL", "http://127.0.0.1:8787").rstrip("/")
+    tok = os.environ.get("OPERATOR_TOKEN", "")
+    if not tok:
+        raise SystemExit("OPERATOR_TOKEN not set (run through the sireum-hub wrapper)")
+    req = urllib.request.Request(base + path, method=method,
+                                 data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read() or b"{}")
+        except ValueError:
+            return e.code, {}
+    except urllib.error.URLError as e:
+        raise SystemExit(f"bridge not reachable at {base}: {e.reason}") from None
+
+
+def needs(ctx: Ctx, args) -> int:
+    code, r = bridge_api("GET", "/v1/access")
+    pending = r.get("pending", [])
+    if not pending:
+        print("No pending access requests.")
+    for p in pending:
+        jobs = ", ".join(p.get("jobs") or []) or "-"
+        print(f"#{p['id']}  {p['kind']:<8} {p['name']:<28} repo:{p['repo_alias']:<14} jobs: {jobs}")
+        if p.get("reason"):
+            print(f"      why: {p['reason']}")
+    return 0
+
+
+def _source_from_flag(flag: str) -> dict:
+    kind, _, rest = flag.partition(":")
+    if kind == "file":
+        return {"api_key_file": rest}
+    if kind == "env":
+        return {"api_key_env": rest}
+    if kind == "cmd":
+        return {"api_key_cmd": shlex.split(rest)}
+    raise SystemExit("--source must be file:PATH, env:VAR or cmd:'COMMAND'")
+
+
+def grant(ctx: Ctx, args) -> int:
+    code, r = bridge_api("GET", "/v1/access")
+    req = next((p for p in r.get("pending", []) if p["id"] == args.id), None)
+    if not req:
+        raise SystemExit(f"no pending request #{args.id} (see: sireum-hub needs)")
+    body: dict = {}
+    if req["kind"] == "secret":
+        if args.source:
+            body.update(_source_from_flag(args.source))
+        elif args.value_file:
+            body["value"] = Path(args.value_file).read_text().strip()
+        else:
+            if not sys.stdin.isatty():
+                raise SystemExit("secret value needed: use --source file:/…|env:…|cmd:'…' or --value-file")
+            print(f"Secret {req['name']} for repo:{req['repo_alias']}"
+                  + (f" — {req['reason']}" if req.get("reason") else ""))
+            print("Paste the value (hidden), or leave empty to give a source instead.")
+            v = getpass.getpass("value: ")
+            if v.strip():
+                body["value"] = v.strip()
+            else:
+                body.update(_source_from_flag(input("source (file:PATH | env:VAR | cmd:'op read …'): ").strip()))
+        expose = args.expose
+        if not expose and sys.stdin.isatty():
+            expose = input("expose to [prepare] / test / agent: ").strip() or "prepare"
+        body["expose"] = expose or "prepare"
+    code, r = bridge_api("POST", f"/v1/access/{args.id}/grant", body)
+    if code != 200:
+        raise SystemExit(f"grant failed: {r.get('error')}")
+    resumed = ", ".join(r.get("resumed") or []) or "none waiting"
+    print(f"granted #{args.id}: {r['kind']} {r['name']} for repo:{r['repo']} (jobs resumed: {resumed})")
+    return 0
+
+
+def deny(ctx: Ctx, args) -> int:
+    code, r = bridge_api("POST", f"/v1/access/{args.id}/deny", {"note": args.note})
+    if code != 200:
+        raise SystemExit(f"deny failed: {r.get('error')}")
+    print(f"denied #{args.id}")
+    return 0
+
+
+def rerun(ctx: Ctx, args) -> int:
+    code, r = bridge_api("POST", f"/v1/jobs/{args.job_id}/rerun", {"why": args.why})
+    if code != 202:
+        raise SystemExit(f"rerun failed: {r.get('error')}")
+    print(f"re-running as {r['job_id']} ({r['state']})")
+    return 0
+
+
+def registry_add(ctx: Ctx, args) -> int:
+    from .pkgrelay import ECOSYSTEMS, Registry
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,40}", args.name):
+        raise SystemExit("registry name: lowercase letters, digits, . _ -")
+    if args.ecosystem not in ECOSYSTEMS:
+        raise SystemExit(f"--ecosystem must be one of {ECOSYSTEMS}")
+    if args.ecosystem == "npm" and not args.scope:
+        raise SystemExit("npm registries need at least one --scope (e.g. @company) so public packages "
+                         "never resolve to the private registry")
+    entry = {"name": args.name, "ecosystem": args.ecosystem, "url": args.url.rstrip("/"),
+             "scopes": args.scope or [], "mode": args.mode, "auth_scheme": args.auth_scheme}
+    if args.username:
+        entry["username"] = args.username
+    if args.auth:
+        entry.update(auth_from_flag(ctx, args.auth, f"registry-{args.name}", None, False))
+    Registry(**entry)  # validate
+    doc = load_yaml(ctx, "registries.yaml", "registries")
+    doc["registries"] = [g for g in doc["registries"] if g.get("name") != args.name] + [entry]
+    HEADER["registries.yaml"] = ("# Private package registries (see bridge/sireum_bridge/pkgrelay.py).\n"
+                                 "# Edited by `sireum-hub registry add`; applied without a restart.\n")
+    save_yaml(ctx, "registries.yaml", doc)
+    print(f"registry {args.name}: {args.ecosystem} {args.mode} {entry['url']} scopes={entry['scopes'] or 'all'}")
+    print(f"  Repos opt in by listing it in .agent/tools.yaml (registries: [{args.name}]); "
+          f"approve per repo with `sireum-hub grant <id>` when asked.")
+    return 0
+
+
+def registry_list(ctx: Ctx, args) -> int:
+    from .creds import describe
+    for g in load_yaml(ctx, "registries.yaml", "registries")["registries"]:
+        print(f"{g['name']:<20} {g.get('ecosystem'):<8} {g.get('mode', 'relay'):<7} {g.get('url')}  "
+              f"scopes={g.get('scopes') or 'all'}  auth: {describe(g)}")
+    return 0
+
+
+def _last_used_fn(args):
+    try:
+        from .access import AccessStore
+        from .store import Store
+        st = AccessStore(Store(str(Path(args.state) / "state.db")))
+        return st.last_used
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def secrets_inventory(ctx: Ctx, args) -> int:
+    from .maintenance import inventory
+    items = inventory(ctx.config, _last_used_fn(args))
+    if not items:
+        print("No credentials configured.")
+    for i in items:
+        extra = f" expose={i['expose']}" if i.get("expose") else (f" mode={i['mode']}" if i.get("mode") else "")
+        lu = i.get("last_used") or "never"
+        print(f"{i['kind']:<9} {i['name']:<24} {i['source']:<48}{extra}  used by: "
+              f"{', '.join(i['used_by']) or '-'}  last used: {lu}")
+    return 0
+
+
+def doctor(ctx: Ctx, args) -> int:
+    from .maintenance import doctor as run
+    findings = run(ctx.config, _last_used_fn(args))
+    mark = {"ok": "✓", "warn": "!", "fail": "✗"}
+    for f in findings:
+        print(f"  {mark[f['level']]} {f['what']}: {f['detail']}")
+    if not findings:
+        print("  nothing to check yet (no enabled repos or registries)")
+    return 1 if any(f["level"] == "fail" for f in findings) else 0
+
+
+def revoke(ctx: Ctx, args) -> int:
+    doc = load_yaml(ctx, "repos.yaml", "repos")
+    entry = next((r for r in doc["repos"] if r.get("alias") == args.repo), None)
+    if not entry:
+        raise SystemExit(f"no repo {args.repo}")
+    key = {"secret": "secrets", "registry": "registries", "egress": "egress"}[args.kind]
+    cur = entry.get(key) or ({} if key == "secrets" else [])
+    if args.name not in cur:
+        raise SystemExit(f"repo {args.repo} has no {args.kind} {args.name}")
+    if key == "secrets":
+        spec = cur.pop(args.name)
+        f = Path((spec or {}).get("api_key_file") or "")
+        if f.name.endswith(".secret") and f.parent == ctx.secrets and f.exists():
+            f.unlink()  # value pasted through `grant`; sources you manage yourself are left alone
+    else:
+        cur.remove(args.name)
+    entry[key] = cur
+    save_yaml(ctx, "repos.yaml", doc)
+    print(f"revoked {args.kind} {args.name} from repo:{args.repo} (applies to the next job)")
+    return 0

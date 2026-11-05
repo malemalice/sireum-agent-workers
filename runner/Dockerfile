@@ -13,6 +13,7 @@ RUN test -n "$CLAUDE_CODE_VERSION" && test "$CLAUDE_CODE_VERSION" != "latest" \
 # git is used locally only (clone from hub, commit, bundle); no credentials in the image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git jq python3 python3-venv python3-yaml \
+      postgresql redis-server \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -u 10001 runner
 

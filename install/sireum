@@ -88,6 +88,18 @@ case "$cmd" in
     journalctl -u nomad -n "${1:-100}" --no-pager
     ;;
 
+  sync-egress)
+    # Fetch the hub's approved extra hosts; reload squid only when the list changed.
+    LIST="$(curl -fsS -m 10 "$HUB_URL/v1/nodes/$NODE_NAME/egress" -H "Authorization: Bearer $NODE_SECRET" \
+      | jq -r '.hosts[]' 2>/dev/null)" || exit 0
+    NEW="$(printf '%s\n' "$LIST" | sed -E 's/^\*\./\./' | grep -E '^\.?[a-z0-9.-]+$' | sort -u || true)"
+    if [[ "$NEW" != "$(cat /etc/sireum/egress-extra.txt 2>/dev/null)" ]]; then
+      printf '%s\n' "$NEW" | sed '/^$/d' > /etc/sireum/egress-extra.txt
+      docker exec sireum-egress squid -k reconfigure 2>/dev/null || docker restart sireum-egress >/dev/null
+      echo "egress allowlist updated: $(wc -l < /etc/sireum/egress-extra.txt) extra host(s)"
+    fi
+    ;;
+
   rebuild)
     # Build the runner image the hub currently expects (after the hub was updated).
     WANT="$(curl -fsS "$HUB_URL/v1/nodes/$NODE_NAME/runner" -H "Authorization: Bearer $NODE_SECRET" | jq -r .image)" \
@@ -120,6 +132,7 @@ sireum — worker helper
   sireum check     run the self-check
   sireum logs [n]  show the last n Nomad log lines
   sireum rebuild   build/pull the runner image the hub expects (after hub updates)
+  sireum sync-egress  refresh the per-repo extra hosts from the hub (runs every 5 min)
   sireum leave     remove this PC from Sireum
 EOF
     ;;

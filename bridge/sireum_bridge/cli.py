@@ -8,6 +8,11 @@
   sireum-hub repos
   sireum-hub connect-hermes USER@HERMES_HOST --taggers alice,bob [--port N]
   sireum-hub runner-image
+  sireum-hub needs | grant ID [--source …|--value-file F] [--expose prepare|test|agent] | deny ID "note"
+  sireum-hub rerun JOB_ID
+  sireum-hub registry add NAME --ecosystem npm|pypi|go|generic --url URL [--scope S]… [--mode relay|inject]
+                      [--auth …] | registry list
+  sireum-hub secrets | doctor | revoke REPO secret|registry|egress NAME
 """
 from __future__ import annotations
 
@@ -21,7 +26,10 @@ from .apis import Nomad, Tailscale
 from .nodes import Nodes
 from .store import Store
 
-COMMANDS = ("invite", "nodes", "add-repo", "repos", "connect-hermes", "runner-image")
+COMMANDS = ("invite", "nodes", "add-repo", "repos", "connect-hermes", "runner-image", "needs", "grant", "deny",
+            "rerun", "registry", "secrets", "doctor", "revoke")
+ADMIN = ("add-repo", "repos", "connect-hermes", "runner-image", "needs", "grant", "deny", "rerun", "registry",
+         "secrets", "doctor", "revoke")
 
 
 def _nodes(state: Path) -> Nodes:
@@ -85,13 +93,49 @@ def main(argv: list[str] | None = None) -> None:
     ch.add_argument("--taggers", required=True, help="Hermes users allowed to tag cards `remote`")
     ch.add_argument("--port", type=int)
     sub.add_parser("runner-image", help="print the runner image tag workers must have")
+    sub.add_parser("needs", help="list pending access requests")
+    gr = sub.add_parser("grant", help="approve an access request (and resume/re-run its jobs)")
+    gr.add_argument("id", type=int)
+    gr.add_argument("--source", help="secret source: file:PATH | env:VAR | cmd:'COMMAND'")
+    gr.add_argument("--value-file", help="read the secret value from this file (stored 0600 on the hub)")
+    gr.add_argument("--expose", choices=("prepare", "test", "agent"),
+                    help="phases that see the secret (default prepare; test includes prepare; agent includes all)")
+    dn = sub.add_parser("deny", help="refuse an access request")
+    dn.add_argument("id", type=int)
+    dn.add_argument("note", nargs="?", default="no reason given")
+    rr = sub.add_parser("rerun", help="run a finished job again (new job id)")
+    rr.add_argument("job_id")
+    rr.add_argument("--why", default="re-run requested by the operator")
+    rg = sub.add_parser("registry", help="private package registries")
+    rgs = rg.add_subparsers(dest="reg_cmd", required=True)
+    ra = rgs.add_parser("add")
+    ra.add_argument("name")
+    ra.add_argument("--ecosystem", required=True)
+    ra.add_argument("--url", required=True, help="registry base (PyPI: the /simple index URL)")
+    ra.add_argument("--scope", action="append", help="npm scope / PyPI name prefix / Go module prefix (repeat)")
+    ra.add_argument("--mode", choices=("relay", "inject"), default="relay")
+    ra.add_argument("--auth", help="gh | token[:VALUE] | file:PATH | env:VAR | cmd:'COMMAND'")
+    ra.add_argument("--auth-scheme", choices=("bearer", "basic", "token"), default="bearer")
+    ra.add_argument("--username", help="for --auth-scheme basic (default __token__)")
+    rgs.add_parser("list")
+    sub.add_parser("secrets", help="inventory of credentials (never values)")
+    sub.add_parser("doctor", help="check every credential")
+    rv = sub.add_parser("revoke", help="remove an approval from a repo")
+    rv.add_argument("repo")
+    rv.add_argument("kind", choices=("secret", "registry", "egress"))
+    rv.add_argument("name")
     args = ap.parse_args(argv)
 
-    if args.cmd in ("add-repo", "repos", "connect-hermes", "runner-image"):
+    if args.cmd in ADMIN:
         from . import admin
         ctx = admin.Ctx()
-        fn = {"add-repo": admin.add_repo, "repos": admin.list_repos,
-              "connect-hermes": admin.connect_hermes, "runner-image": admin.runner_image}[args.cmd]
+        if args.cmd == "registry":
+            fn = admin.registry_add if args.reg_cmd == "add" else admin.registry_list
+        else:
+            fn = {"add-repo": admin.add_repo, "repos": admin.list_repos, "connect-hermes": admin.connect_hermes,
+                  "runner-image": admin.runner_image, "needs": admin.needs, "grant": admin.grant,
+                  "deny": admin.deny, "rerun": admin.rerun, "secrets": admin.secrets_inventory,
+                  "doctor": admin.doctor, "revoke": admin.revoke}[args.cmd]
         raise SystemExit(fn(ctx, args))
 
     nodes = _nodes(args.state)

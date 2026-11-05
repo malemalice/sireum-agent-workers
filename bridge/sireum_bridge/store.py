@@ -78,6 +78,10 @@ class Store:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
         self.lock = threading.RLock()
+        # Migrations for databases created by earlier versions.
+        cols = {r["name"] for r in self.db.execute("PRAGMA table_info(jobs)")}
+        if "grants" not in cols:
+            self.db.execute("ALTER TABLE jobs ADD COLUMN grants TEXT")
 
     # -- jobs -------------------------------------------------------------
     def add_job(self, job: dict, repo_alias: str, repo_key: str, executor: str, base_commit: str,
@@ -111,7 +115,8 @@ class Store:
 
     def running_count(self, executor: str) -> int:
         return self.db.execute(
-            "SELECT COUNT(*) FROM jobs WHERE executor=? AND state != 'finished'", (executor,)).fetchone()[0]
+            "SELECT COUNT(*) FROM jobs WHERE executor=? AND state IN ('dispatched', 'running')",
+            (executor,)).fetchone()[0]
 
     # -- leases -----------------------------------------------------------
     def latest_lease(self, job_id: str) -> sqlite3.Row | None:
@@ -126,6 +131,8 @@ class Store:
                 return None, "unknown job"
             if job["state"] == "finished":
                 return None, "job finished"
+            if job["state"] == "waiting_access":
+                return None, "waiting for access approval"
             cur = self.latest_lease(job_id)
             now = time.time()
             if cur and not cur["released"] and cur["expires_at"] > now:

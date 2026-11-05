@@ -33,9 +33,12 @@ if [[ -n "$HUB_HOST" ]]; then
 else
   install -m 0644 "$HERE/egress/squid.conf" "$CONF_DIR/squid.conf"
 fi
+# Per-repo extra hosts (synced by `sireum sync-egress`); squid needs the file to exist.
+[[ -f "$CONF_DIR/egress-extra.txt" ]] || : > "$CONF_DIR/egress-extra.txt"
 docker rm -f sireum-egress >/dev/null 2>&1 || true
 docker run -d --name sireum-egress --restart unless-stopped \
   -v "$CONF_DIR/squid.conf:/etc/squid/squid.conf:ro" \
+  -v "$CONF_DIR/egress-extra.txt:/etc/squid/egress-extra.txt:ro" \
   "$SQUID_IMAGE"
 docker network connect --alias egress sireum-jobs sireum-egress
 

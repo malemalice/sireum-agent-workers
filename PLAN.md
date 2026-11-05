@@ -220,6 +220,7 @@ git host; nothing has run on real hardware yet.
 | `sireum-kanban` forced command | ✓ | against a fake `hermes` CLI | **match the command templates to the real CLI** |
 | Enrollment: `sireum-hub invite`, enroll / seats / leave | ✓ | tests (no Tailscale/Nomad) | Tailscale OAuth key minting, Nomad Variables |
 | Hub installer (`hub/install-hub.sh`), Nomad server + ACL policies, crons | ✓ | syntax only | run on the hub PC |
+| Phase 6: access requests, per-phase secrets, package relay (npm/PyPI/Go), egress sync, services, hub signing, doctor | ✓ | 9 tests (fake registry, signed-commit verify) + Docker smoke 13/13 | a real private registry; GitHub App commits not built |
 | Phase 1.5: add-repo, connect-hermes, worker-built image, invites without Tailscale OAuth | ✓ | 10 tests (fake GitHub API, dry-run SSH) | real GitHub, hermes-host, a worker build |
 | Native macOS hub (`hub/install-hub-macos.sh`) + GHCR pull auth | ✓ | bash 3.2 syntax, launchd plists lint, bridge + enrol on macOS Python 3.9, 27 tests on 3.9 and 3.13 | run on the hub Mac; GHCR package + tokens |
 | Worker installers (`install/`) | updated | syntax only | MBP (Lima), one Windows PC |
@@ -290,7 +291,7 @@ OpenCode seat tokens on each worker.
 - Not verified on real systems: `add-repo` against github.com, `connect-hermes` against
   hermes-host, a worker building the image inside Lima/WSL2.
 
-### Phase 6 — credentials, packages, secrets, access requests
+### Phase 6 — credentials, packages, secrets, access requests (built 2026-11-05)
 Principle (industry practice): short-lived, least-privilege credentials held by the hub;
 workers and the agent see as little as possible; a repo **requests** access in its
 manifest and the operator **approves** it in `repos.yaml`; a job only receives the
@@ -321,6 +322,12 @@ intersection. Every credential uses one pluggable source: `api_key_file`, `api_k
     `revoke`, per-job audit of what was granted.
 6f. **Signing** — default: signed at merge (GitHub squash/rebase); per repo: hub SSH
     signing or GitHub App API commits when every branch must be signed.
+
+Built: `access.py`, `accessops.py`, `pkgrelay.py`, `maintenance.py`; runner `Grants` /
+`Services` / `detect_needs` / redaction; CLI `needs`, `grant`, `deny`, `rerun`,
+`registry add|list`, `secrets`, `doctor`, `revoke`; `sireum sync-egress`; hub SSH signing.
+GitHub App API commits (C3) not built. Tests: `tests/test_phase6.py` (9) + Docker smoke
+(postgres + redis services, approved extra host) — 46 tests total.
 
 Verify: private npm package installs via relay with no token in the job; `@company/*`
 never hits the public registry; a secret with `prepare` exposure is absent during the

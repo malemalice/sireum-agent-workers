@@ -14,7 +14,8 @@ Restart=always
 RestartSec=5
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/srv/sireum/state
+# state: DB, mirrors · bridge: repos.yaml (grants) · secrets: values pasted via `sireum-hub grant`
+ReadWritePaths=/srv/sireum/state /srv/sireum/bridge /srv/sireum/secrets
 ProtectHome=read-only
 PrivateTmp=true
 

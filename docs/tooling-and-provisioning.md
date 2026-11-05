@@ -38,6 +38,11 @@ test_targets:                    # cards reference these by name only
   auth: pytest -q tests/auth
   unit: pytest -q
   e2e:  npx playwright test
+# Phase 6 — requests (the operator approves per repo; a job gets the intersection)
+secrets: [STRIPE_TEST_KEY]       # names only; values live on the hub
+registries: [npm-company]        # defined on the hub with `sireum-hub registry add`
+egress: [api.stripe.com]         # extra hosts (fleet-wide once approved)
+services: [postgres, redis]      # throwaway, inside the job; no approval needed
 protected_paths:                 # changes here set tests_modified=true
   - tests/
   - .agent/

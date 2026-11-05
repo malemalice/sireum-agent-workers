@@ -50,6 +50,8 @@ class Booster:
             lines.append("The change touches protected paths (tests/CI) — review carefully.")
         if res.get("error"):
             lines.append(f"Error: {res['error'].get('code')} — {str(res['error'].get('message'))[:300]}")
+        for r in res.get("access_requests") or []:
+            lines.append("Access request: " + r["message"])
         if res.get("summary"):
             lines.append("\n" + str(res["summary"])[:1500])
         if STATUS_VERB.get(status) == "release":
@@ -122,7 +124,10 @@ class Booster:
         if code != 202:
             return self.give_back(card.id, f"dispatch failed ({code}: {resp.get('error')})")
         self.b.store.card_attach(card.id, job_id)
-        self.b.store.outbox_add(card.id, "comment",
-                                f"Sireum picked this up as job `{job_id}` on {resp['executor']} "
-                                f"({datetime.now().astimezone().strftime('%H:%M %Z')}).")
+        msg = (f"Sireum picked this up as job `{job_id}` on {resp['executor']} "
+               f"({datetime.now().astimezone().strftime('%H:%M %Z')}).")
+        if resp.get("state") == "waiting_access":
+            msg += "\nIt is waiting for access the repo asks for:\n" + "\n".join(
+                "- " + r["message"] for r in resp.get("access_requests", []))
+        self.b.store.outbox_add(card.id, "comment", msg)
         log.info("card %s -> job %s", card.id, job_id)

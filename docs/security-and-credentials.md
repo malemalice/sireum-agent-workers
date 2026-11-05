@@ -169,3 +169,25 @@ Runner image pinned by digest, multi-arch, CLIs pinned by npm version, no
   Alternative: make the image public and leave `REGISTRY_USERNAME` empty.
 - `NOMAD_SERVERS` is a comma-separated list; the bridge also tolerates `[a,b]` because
   `bash` and systemd strip quotes from env files.
+
+## Phase 6 — secrets, registries, egress (2026-11-05)
+
+- **Request vs approval.** A repo's manifest (at `base_commit`) can only *request*
+  secrets, registries and hosts; approvals live in the hub's `repos.yaml`
+  (`sireum-hub grant`). A card or branch can't grant itself anything.
+- **Secret exposure.** Default `prepare`; `test` and `agent` are explicit. Values go to
+  the job only in its lease response, sit in memory and phase-specific env, and are
+  redacted from results and logs by both the runner and the bridge. Pasted values are
+  stored on the hub as `secrets/<repo>-<NAME>.secret` (0600); YAML holds sources only.
+- **Registries.** Relay mode: the hub adds the upstream credential; the job only holds its
+  lease token. Inject mode: the upstream token is written to the job HOME for prepare and
+  removed before the agent starts. npm scopes, PyPI name prefixes and Go module prefixes
+  block dependency confusion (private names never resolve publicly, and the reverse).
+- **Extra egress is fleet-wide.** Squid on each worker is shared by all jobs on it, so an
+  approved host is reachable by every job on the fleet, not only the approving repo.
+  Approved hosts never bypass the LAN/tailnet block. Per-job egress is a possible later
+  hardening (per-job proxy auth).
+- **Hub signing** (`signing: hub-ssh`): the hub re-creates agent commits signed with an SSH
+  key on the hub; workers never see it. Default `merge`: GitHub signs at merge.
+- **Daily credential check** posts failures, tokens expiring within 7 days, and secrets
+  unused for 60 days to Discord.

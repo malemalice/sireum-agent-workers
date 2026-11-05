@@ -22,11 +22,15 @@ from pathlib import Path
 
 import yaml
 
+from .access import AccessStore
+from .accessops import AccessOps
 from .apis import APIError, Nomad, Tailscale
+from .pkgrelay import Relay as PkgRelay
 from . import runnersrc
 from .booster import Booster
 from .creds import Resolver
 from .nodes import Nodes
+from .pkgrelay import Registry
 from .relay import GitHost, Relay, RelayError, Repo
 from .sources import SourceError, make_source
 from .store import Store
@@ -74,7 +78,7 @@ def parse_iso(ts: str | None) -> float | None:
         return None
 
 
-class Bridge:
+class Bridge(AccessOps):
     def __init__(self, config_dir: Path, state_dir: Path):
         env = os.environ
         self.worker_token = env.get("WORKER_TOKEN") or ""
@@ -84,7 +88,7 @@ class Bridge:
         self.public_url = env.get("BRIDGE_PUBLIC_URL", "http://localhost:8787").rstrip("/")
         self.lease_ttl = int(env.get("LEASE_TTL_SEC", "120"))
         self.limits = parse_limits(env.get("EXECUTOR_LIMITS", ""))
-        self.discord = env.get("DISCORD_WEBHOOK_URL")
+        self.discord_url = env.get("DISCORD_WEBHOOK_URL")
         self.nomad = Nomad(env["NOMAD_ADDR"], env.get("NOMAD_TOKEN")) if env.get("NOMAD_ADDR") else None
         self.claim_grace = parse_duration(env.get("CLAIM_GRACE"), 600)
         self.poll_interval = parse_duration(env.get("POLL_INTERVAL"), 30)
@@ -93,10 +97,13 @@ class Bridge:
         self._config_mtimes: tuple = ()
         self.hosts: dict[str, GitHost] = {}
         self.repos: list[Repo] = []
+        self.registries: dict[str, Registry] = {}
         self.load_config(initial=True)
         state_dir.mkdir(parents=True, exist_ok=True)
         self.store = Store(str(state_dir / "state.db"))
         self.relay = Relay(state_dir, self.hosts, int(env.get("BUNDLE_MAX_MB", "50")), Resolver())
+        self.access = AccessStore(self.store)
+        self.pkg = PkgRelay(self.relay.creds)
         self.runs_dir = state_dir / "runs"
         self.runs_dir.mkdir(exist_ok=True)
 
@@ -122,10 +129,13 @@ class Bridge:
 
     # -- lookups ----------------------------------------------------------
     def load_config(self, initial: bool = False) -> bool:
-        """(Re)load git_hosts.yaml + repos.yaml when they change. A bad edit keeps the old config."""
+        """(Re)load git_hosts.yaml, repos.yaml, registries.yaml (optional) when they change.
+        A bad edit keeps the previous config."""
         files = [self.config_dir / "git_hosts.yaml", self.config_dir / "repos.yaml"]
+        reg_file = self.config_dir / "registries.yaml"
         try:
-            mtimes = tuple(f.stat().st_mtime_ns for f in files)
+            mtimes = tuple(f.stat().st_mtime_ns for f in files) + (
+                reg_file.stat().st_mtime_ns if reg_file.exists() else 0,)
         except OSError as e:
             if initial:
                 raise SystemExit(f"config missing: {e}")
@@ -137,7 +147,9 @@ class Bridge:
             repos_doc = yaml.safe_load(files[1].read_text()) or {}
             hosts = {h["id"]: GitHost(**h) for h in hosts_doc.get("hosts") or []}
             repos = [Repo(**r) for r in repos_doc.get("repos") or []]
-        except (yaml.YAMLError, TypeError, KeyError) as e:
+            reg_doc = (yaml.safe_load(reg_file.read_text()) if reg_file.exists() else None) or {}
+            registries = {r["name"]: Registry(**r) for r in reg_doc.get("registries") or []}
+        except (yaml.YAMLError, TypeError, KeyError, ValueError) as e:
             if initial:
                 raise SystemExit(f"bad config: {e}")
             log.error("config reload failed, keeping the previous config: %s", e)
@@ -146,6 +158,7 @@ class Bridge:
         self.hosts.clear()
         self.hosts.update(hosts)          # Relay holds the same dict object
         self.repos = repos
+        self.registries = registries
         self._config_mtimes = mtimes
         if not initial:
             self.relay.creds.invalidate()
@@ -242,25 +255,62 @@ class Bridge:
         }
         if not self.store.add_job(job, repo.alias, repo.key, chosen, base_commit, card_id):
             return 409, {"error": "job already exists", "job_id": job_id}
-        if self.nomad:
-            try:
-                job["dispatch_id"] = self.nomad.dispatch(job_id)
-                self.store.set_job(job_id, job=json.dumps(job))
-            except APIError as e:
-                self.finish(job_id, {"job_id": job_id, "status": "failed", "executor": chosen,
-                                     "error": {"code": "dispatch", "message": str(e), "reset_at": None},
-                                     "finished_at": now_iso()}, notify=False)
-                return 503, {"error": f"nomad dispatch failed: {e}", "retry_after": 60}
+        status_url = f"{self.public_url}/v1/runs/{job_id}"
+        # Pre-flight: anything the repo's manifest requests but the operator hasn't approved
+        # becomes an access request; the job waits instead of failing mid-run.
+        miss = self.preflight(repo, base_commit)
+        if miss:
+            self.store.set_job(job_id, state="waiting_access")
+            reqs = self.open_requests(repo.alias, job_id, [{"kind": k, "name": n,
+                                                            "reason": "requested in .agent/tools.yaml"}
+                                                           for k, n in miss])
+            log.info("job %s waiting for access: %s", job_id, [(r["kind"], r["name"]) for r in reqs])
+            return 202, {"job_id": job_id, "state": "waiting_access", "executor": chosen,
+                         "status_url": status_url, "access_requests": reqs}
+        err = self.dispatch_to_nomad(job_id)
+        if err:
+            return 503, {"error": f"nomad dispatch failed: {err}", "retry_after": 60}
         log.info("dispatched %s repo=%s executor=%s base=%s", job_id, repo.alias, chosen, base_commit[:10])
-        return 202, {"job_id": job_id, "state": "dispatched", "executor": chosen,
-                     "status_url": f"{self.public_url}/v1/runs/{job_id}"}
+        return 202, {"job_id": job_id, "state": "dispatched", "executor": chosen, "status_url": status_url}
+
+    def dispatch_to_nomad(self, job_id: str) -> str | None:
+        """Start a runner allocation (no-op without Nomad). Returns an error message or None."""
+        if not self.nomad:
+            return None
+        row = self.store.job(job_id)
+        job = json.loads(row["job"])
+        try:
+            job["dispatch_id"] = self.nomad.dispatch(job_id)
+            self.store.set_job(job_id, job=json.dumps(job))
+            return None
+        except APIError as e:
+            self.finish(job_id, {"job_id": job_id, "status": "failed", "executor": row["executor"],
+                                 "error": {"code": "dispatch", "message": str(e), "reset_at": None},
+                                 "finished_at": now_iso()}, notify=False)
+            return str(e)
+
+    def discord(self, msg: str) -> None:
+        if not self.discord_url:
+            return
+        try:
+            req = urllib.request.Request(self.discord_url, data=json.dumps({"content": msg[:1900]}).encode(),
+                                         method="POST", headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=10).close()
+        except OSError as e:
+            log.warning("discord webhook failed: %s", e)
 
     def lease_job(self, job_id: str) -> tuple[int, dict]:
         lease, why = self.store.acquire_lease(job_id, self.lease_ttl)
         if lease is None:
             return (404 if why == "unknown job" else 409), {"error": why}
         row = self.store.job(job_id)
+        try:
+            grants = self.build_grants(row, self.repo_by_alias(row["repo_alias"]), lease["clone_token"])
+        except (StopIteration, RelayError) as e:
+            log.warning("grants for %s: %s", job_id, e)
+            grants = {"secrets": [], "registries": [], "egress": [], "services": [], "errors": [str(e)]}
         return 200, {
+            "grants": grants,
             "job": json.loads(row["job"]),
             "executor": row["executor"],
             "base_commit": row["base_commit"],
@@ -308,9 +358,23 @@ class Bridge:
             res = {k: v for k, v in res.items()}
             res["executor"] = row["executor"]
             res["logs_url"] = f"{self.public_url}/v1/runs/{job_id}"
+            # Scrub any granted secret value the job might echo back.
+            secret_vals = self.granted_secret_values(row)
+            if secret_vals:
+                blob = json.dumps(res)
+                for v in secret_vals:
+                    blob = blob.replace(json.dumps(v)[1:-1], "[redacted]")
+                res = json.loads(blob)
+            needs = [n for n in (res.get("needs") or []) if isinstance(n, dict)]
+            if needs:
+                res["access_requests"] = self.open_requests(row["repo_alias"], job_id, needs)
+                if res.get("status") in ("success", "needs_review", "failed"):
+                    res["status"] = "blocked"
+                res["error"] = res.get("error") or {"code": "needs_access", "reset_at": None,
+                                                     "message": "job needs access that was not granted"}
             if row["bundle_tip"] and res.get("status") in ("success", "needs_review", "blocked"):
                 try:
-                    self.relay.push(repo, job_id)
+                    self.relay.push(repo, job_id, row["base_commit"])
                     res["mr_url"] = self.relay.open_mr(
                         repo, job["branch"], f"[sireum] {job['task'][:70]}",
                         f"{res.get('summary') or ''}\n\nTask: {job['task']}\n\nAcceptance: {job['acceptance']}\n\n"
@@ -346,18 +410,13 @@ class Bridge:
                         datetime.fromtimestamp(until).isoformat(timespec="minutes"))
         elif res.get("status") in ("success", "needs_review"):
             self.store.resume(executor, reset_backoff=True)
-        if self.discord and notify:
+        if notify:
             msg = f"Sireum `{res.get('job_id')}` → **{res.get('status')}**"
             if res.get("mr_url"):
                 msg += f" — {res['mr_url']}"
             if res.get("summary"):
                 msg += f"\n{res['summary'][:300]}"
-            try:
-                req = urllib.request.Request(self.discord, data=json.dumps({"content": msg}).encode(),
-                                             method="POST", headers={"Content-Type": "application/json"})
-                urllib.request.urlopen(req, timeout=10).close()
-            except OSError as e:
-                log.warning("discord webhook failed: %s", e)
+            self.discord(msg)
 
     def run_view(self, job_id: str) -> dict | None:
         row = self.store.job(job_id)
@@ -370,6 +429,11 @@ class Bridge:
             out["attempt"] = lease["attempt"]
         if row["result"]:
             out["result"] = json.loads(row["result"])
+        if row["grants"]:
+            out["granted"] = json.loads(row["grants"])
+        reqs = self.access.open_for_job(job_id)
+        if reqs:
+            out["access_requests"] = [{"id": r["id"], "kind": r["kind"], "name": r["name"]} for r in reqs]
         return out
 
     def status(self) -> dict:
@@ -386,6 +450,7 @@ class Bridge:
             }
         return {"executors": execs,
                 "nodes": [n["name"] for n in self.nodes.list()],
+                "access_requests_pending": len(self.access.pending()),
                 "kanban_outbox_pending": len(self.store.outbox_pending()),
                 "active": [{"job_id": r["job_id"], "state": r["state"], "executor": r["executor"],
                             "repo": r["repo_alias"]} for r in self.store.active_jobs()],
@@ -393,12 +458,26 @@ class Bridge:
                             "status": json.loads(r["result"]).get("status") if r["result"] else None}
                            for r in self.store.recent_jobs()]}
 
+    def daily_check(self) -> None:
+        """Credential health + expiry/unused warnings → Discord (problems only)."""
+        from .maintenance import doctor
+        problems = [f for f in doctor(self.config_dir, self.access.last_used, self.relay.creds)
+                    if f["level"] != "ok"]
+        for f in problems:
+            log.warning("doctor: %s %s: %s", f["level"], f["what"], f["detail"])
+        if problems:
+            self.discord("Sireum credential check:\n" + "\n".join(
+                f"{'✗' if f['level'] == 'fail' else '!'} {f['what']}: {f['detail']}" for f in problems[:20]))
+
     def reconcile(self) -> None:
         """Hand back jobs nobody picked up within CLAIM_GRACE; fail jobs that never reported."""
+        self.expire_waiting()
         now = time.time()
         for row in self.store.active_jobs():
             job = json.loads(row["job"])
             lease = self.store.latest_lease(row["job_id"])
+            if row["state"] == "waiting_access":
+                continue
             if lease is None and now - row["created_at"] > self.claim_grace:
                 if self.nomad and job.get("dispatch_id"):
                     try:
@@ -486,6 +565,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True})
             if path.startswith("/git/"):
                 return self._git()
+            if m := re.fullmatch(r"/pkg/([a-z0-9][a-z0-9_.-]*)(/.*)?", path):
+                return self._pkg(m[1], m[2] or "/")
+            if m := re.fullmatch(r"/v1/nodes/([a-z0-9-]+)/egress", path):
+                if not b.nodes.auth_node(m[1], self._token()):
+                    return self._send(401, {"error": "unauthorized"})
+                return self._send(200, {"hosts": b.egress_union()})
+            if path == "/v1/access":
+                if self._authz(b.operator_token):
+                    self._send(200, {"pending": b.list_requests()})
+                return
             if m := re.fullmatch(r"/v1/jobs/([^/]+)", path):
                 if self._authz(b.worker_token):
                     self._send(*b.lease_job(m[1]))
@@ -549,6 +638,18 @@ class Handler(BaseHTTPRequestHandler):
                 if self._authz(b.worker_token) and (body := self._json()) is not None:
                     self._send(*b.accept_result(body))
                 return
+            if m := re.fullmatch(r"/v1/access/(\d+)/(grant|deny)", path):
+                if self._authz(b.operator_token) and (body := self._json()) is not None:
+                    if m[2] == "grant":
+                        self._send(*b.grant(int(m[1]), body))
+                    else:
+                        self._send(*b.deny(int(m[1]), str(body.get("note") or "no reason given")))
+                return
+            if m := re.fullmatch(r"/v1/jobs/([^/]+)/rerun", path):
+                if self._authz(b.operator_token):
+                    body = self._json() or {}
+                    self._send(*b.rerun(m[1], str(body.get("why") or "re-run requested by the operator")))
+                return
             if m := re.fullmatch(r"/v1/executors/(claude|opencode)/(pause|resume)", path):
                 if self._authz(b.operator_token):
                     body = self._json() or {}
@@ -595,6 +696,32 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             log.exception("DELETE %s", path)
             self._send(500, {"error": str(e)})
+
+    def _pkg(self, name: str, rest: str):
+        """Package relay: lease token in, upstream credential added by the hub."""
+        b = self.bridge
+        lease = b.store.lease_by_token(self._token())
+        row = b.store.job(lease["job_id"]) if lease else None
+        granted = json.loads((row["grants"] if row else None) or "{}").get("registries", [])
+        reg = b.registries.get(name)
+        if not lease or not b.store.is_live(lease) or not row or name not in granted or not reg or reg.mode != "relay":
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="sireum-pkg"')
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        try:
+            r = b.pkg.forward(reg, rest, self.path.partition("?")[2], f"{b.public_url}/pkg/{name}",
+                              self.headers.get("Accept"))
+        except Exception as e:  # noqa: BLE001
+            log.warning("pkg relay %s %s: %s", name, rest, e)
+            return self._send(502, {"error": "relay failed"})
+        self.send_response(r.status)
+        for k, v in r.headers.items():
+            self.send_header(k, v)
+        self.send_header("Content-Length", str(len(r.body)))
+        self.end_headers()
+        self.wfile.write(r.body)
 
     # Read-only smart HTTP for the lease's repo only.
     def _git(self):
@@ -675,6 +802,7 @@ def main(argv: list[str] | None = None) -> None:
     loop(bridge.reconcile, int(os.environ.get("RECONCILE_INTERVAL", "60")), "reconciler")
     if bridge.booster:
         loop(bridge.booster.tick, bridge.poll_interval, "booster")
+    loop(bridge.daily_check, int(os.environ.get("DOCTOR_INTERVAL", str(24 * 3600))), "doctor")
     host, _, port = args.listen.rpartition(":")
     srv = ThreadingHTTPServer((host or "0.0.0.0", int(port)), Handler)
     log.info("listening on %s (repos: %s)", args.listen, ", ".join(r.alias for r in bridge.repos if r.enabled))

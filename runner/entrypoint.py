@@ -18,7 +18,9 @@ import subprocess
 import sys
 import threading
 import time
+import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -54,6 +56,12 @@ Rules:
 - Network goes only through a proxy to model endpoints and package registries.
 - No sudo or apt. If you need a system package or human input, stop and print
   a line starting with "BLOCKED:" and the reason.
+- If you need a credential, a private package registry, or a network host you
+  don't have, don't work around it: print one line per need and stop, e.g.
+    SIREUM-NEED: secret STRIPE_TEST_KEY "integration tests call the Stripe sandbox"
+    SIREUM-NEED: egress api.stripe.com "Stripe API"
+    SIREUM-NEED: registry npm-company "@company/* packages"
+  The operator approves it and the job is re-run.
 - Do not edit tests, .agent/ or CI files unless the task requires it.
 - Finish with a short summary of what you changed.
 """
@@ -66,6 +74,9 @@ FAKE_SCRIPT = (
     '*blocked*) echo "BLOCKED: needs libpq-dev";; '
     '*touch-tests*) mkdir -p tests && echo "# edited" >> tests/test_fake.py;; '
     '*noop*) git checkout -q -- . 2>/dev/null; rm -f SIREUM_FAKE.md;; '
+    '*need-secret*) echo \'SIREUM-NEED: secret STRIPE_TEST_KEY "tests call the Stripe sandbox"\';; '
+    '*echo-secrets*) echo "agent sees: APP_PREP=${APP_PREP:-none} APP_TEST=${APP_TEST:-none} '
+    'APP_AGENT=${APP_AGENT:-none}";; '
     'esac; echo "fake executor edited SIREUM_FAKE.md"'
 )
 
@@ -265,7 +276,207 @@ def load_manifest(mirror: Path, base_commit: str, path: str) -> dict:
         return {}
 
 
-def prepare(manifest: dict, wt: Path, mirror: Path, job: dict, log_path: Path) -> tuple[dict, str | None, str | None]:
+# -- grants: secrets, registries, services, access needs (Phase 6) -------------------
+
+PHASES = {"prepare": ("prepare",), "test": ("prepare", "test"), "agent": ("prepare", "test", "agent")}
+
+
+class Grants:
+    def __init__(self, g: dict | None, home: Path):
+        g = g or {}
+        self.secrets = [s for s in g.get("secrets") or [] if s.get("name") and s.get("value") is not None]
+        self.registries = g.get("registries") or []
+        self.services = g.get("services") or []
+        self.egress = g.get("egress") or []
+        self.errors = g.get("errors") or []
+        self.home = home
+
+    def secret_env(self, phase: str) -> dict:
+        """Secrets visible in a phase: `prepare` < `test` < `agent` (wider includes narrower)."""
+        return {s["name"]: str(s["value"]) for s in self.secrets if phase in PHASES.get(s.get("expose"), ("prepare",))}
+
+    def values(self) -> list[str]:
+        vals = [str(s["value"]) for s in self.secrets if len(str(s["value"])) >= 4]
+        vals += [str(r["token"]) for r in self.registries if r.get("token") and len(str(r["token"])) >= 4]
+        return vals
+
+    def registry_env(self, include_inject: bool) -> dict:
+        """Write ~/.npmrc and ~/.netrc in the job HOME; return env. Inject-mode entries only during prepare."""
+        npmrc, netrc, env, goproxy, nosum, pip_extra = [], [], {}, [], [], []
+        for r in self.registries:
+            if r.get("mode") == "inject" and not include_inject:
+                continue
+            url, tok, eco = str(r["url"]).rstrip("/"), r.get("token") or "", r.get("ecosystem")
+            u = urllib.parse.urlsplit(url)
+            if eco == "npm":
+                if r.get("scopes"):
+                    npmrc += [f"{s}:registry={url}/" for s in r["scopes"]]
+                else:
+                    npmrc.append(f"registry={url}/")
+                if tok:
+                    npmrc.append(f"//{u.netloc}{u.path}/:_authToken={tok}")
+            elif eco == "pypi":
+                cred = f"{urllib.parse.quote(r.get('username') or 'sireum', safe='')}:{urllib.parse.quote(tok, safe='')}@" if tok else ""
+                index = f"{u.scheme}://{cred}{u.netloc}{u.path}"
+                if r.get("mode") == "relay":
+                    # The relay serves private names and redirects all others to pypi.org.
+                    env["PIP_INDEX_URL"] = env["UV_INDEX_URL"] = index.rstrip("/") + "/simple/"
+                else:
+                    pip_extra.append(index.rstrip("/") + "/")
+            elif eco == "go":
+                goproxy.append(url)
+                nosum += r.get("scopes") or []
+                if tok:
+                    netrc.append(f"machine {u.hostname} login {r.get('username') or 'sireum'} password {tok}")
+            else:
+                if tok:
+                    netrc.append(f"machine {u.hostname} login {r.get('username') or 'sireum'} password {tok}")
+        if pip_extra:
+            env["PIP_EXTRA_INDEX_URL"] = " ".join(pip_extra)
+        if goproxy:
+            env["GOPROXY"] = ",".join(goproxy + ["https://proxy.golang.org"])
+            if nosum:
+                env["GONOSUMDB"] = ",".join(nosum)
+        for name, lines in ((".npmrc", npmrc), (".netrc", netrc)):
+            p = self.home / name
+            if lines:
+                p.write_text("\n".join(lines) + "\n")
+                p.chmod(0o600)
+            else:
+                p.unlink(missing_ok=True)
+        if netrc:
+            env["NETRC"] = str(self.home / ".netrc")
+        return env
+
+
+class Services:
+    """Throwaway local services inside the job (no secrets, no network). Needs the binaries in the image."""
+
+    def __init__(self, names: list[str], workdir: Path):
+        self.names, self.dir, self.stops = names, workdir, []
+
+    @staticmethod
+    def _port() -> int:
+        import socket
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    @staticmethod
+    def _pg_bin(tool: str) -> str | None:
+        import glob
+        found = shutil.which(tool) or next(iter(sorted(glob.glob(f"/usr/lib/postgresql/*/bin/{tool}"), reverse=True)), None)
+        return found
+
+    def start(self, log_path: Path) -> tuple[dict, str | None]:
+        env: dict = {}
+        with open(log_path, "a") as lf:
+            for name in self.names:
+                if name == "postgres":
+                    initdb, pg_ctl = self._pg_bin("initdb"), self._pg_bin("pg_ctl")
+                    if not (initdb and pg_ctl):
+                        return env, "postgres is not installed in this runner image"
+                    data, port = self.dir / "pg", self._port()
+                    lf.write(f"\n--- service postgres :{port}\n")
+                    lf.flush()
+                    r1 = subprocess.run([initdb, "-D", str(data), "-U", "postgres", "-A", "trust", "--no-sync", "-E", "UTF8"],
+                                        stdout=lf, stderr=subprocess.STDOUT)
+                    r2 = subprocess.run([pg_ctl, "-D", str(data), "-w", "-l", str(self.dir / "pg.log"), "-o",
+                                         f"-k {data} -c listen_addresses=127.0.0.1 -p {port} -c fsync=off", "start"],
+                                        stdout=lf, stderr=subprocess.STDOUT) if r1.returncode == 0 else r1
+                    if r2.returncode != 0:
+                        return env, "postgres failed to start"
+                    self.stops.append(lambda d=data: subprocess.run([pg_ctl, "-D", str(d), "-m", "immediate", "stop"],
+                                                                  capture_output=True))
+                    env.update(DATABASE_URL=f"postgresql://postgres@127.0.0.1:{port}/postgres", PGHOST="127.0.0.1",
+                               PGPORT=str(port), PGUSER="postgres", PGDATABASE="postgres")
+                elif name == "redis":
+                    exe = shutil.which("redis-server")
+                    if not exe:
+                        return env, "redis is not installed in this runner image"
+                    port, pid = self._port(), self.dir / "redis.pid"
+                    lf.write(f"\n--- service redis :{port}\n")
+                    lf.flush()
+                    r = subprocess.run([exe, "--port", str(port), "--bind", "127.0.0.1", "--save", "", "--appendonly",
+                                        "no", "--daemonize", "yes", "--dir", str(self.dir), "--pidfile", str(pid)],
+                                       stdout=lf, stderr=subprocess.STDOUT)
+                    if r.returncode != 0:
+                        return env, "redis failed to start"
+                    for _ in range(50):
+                        if pid.exists():
+                            break
+                        time.sleep(0.1)
+                    self.stops.append(lambda p=pid: _kill_pidfile(p))
+                    env["REDIS_URL"] = f"redis://127.0.0.1:{port}/0"
+        return env, None
+
+    def stop(self) -> None:
+        for fn in reversed(self.stops):
+            try:
+                fn()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _kill_pidfile(p: Path) -> None:
+    try:
+        os.kill(int(p.read_text().strip()), signal.SIGTERM)
+    except (OSError, ValueError):
+        pass
+
+
+ENV_MISSING_RES = (
+    re.compile(r"KeyError: ['\"]([A-Z][A-Z0-9_]{2,63})['\"]"),
+    re.compile(r"environment variable[\s:'\"`]+([A-Z][A-Z0-9_]{2,63})['\"`]?\s+(?:is\s+)?(?:not set|missing|required|undefined)",
+               re.I),
+    re.compile(r"missing (?:required )?env(?:ironment)?(?: var(?:iable)?)?[\s:'\"`]+([A-Z][A-Z0-9_]{2,63})", re.I),
+)
+PROXY_403_RE = re.compile(r"(?:tunnel|proxy|CONNECT)[^\n]{0,200}?\b403\b|\b403\b[^\n]{0,80}(?:tunnel|proxy)", re.I)
+HOST_RE = re.compile(r"(?:https?://|CONNECT\s+|host[=: ]+['\"]?)([a-z0-9][a-z0-9.-]*\.[a-z]{2,})", re.I)
+NPM_SCOPE_RE = re.compile(r"(?:E401|E403|E404|404 Not Found)[^\n]*?(@[a-z0-9][a-z0-9._-]*)[/%]", re.I)
+
+
+def detect_needs(text: str, grants: Grants, hub_host: str, allowed_hosts: list[str]) -> list[dict]:
+    """Infer missing access from output. Explicit SIREUM-NEED lines first, then heuristics."""
+    needs: dict = {}
+
+    def add(kind, name, reason, evidence=""):
+        needs.setdefault((kind, name), {"kind": kind, "name": name, "reason": reason, "evidence": evidence[:300]})
+
+    for line in text.splitlines():
+        m = re.match(r'^\s*SIREUM-NEED:\s*(secret|registry|egress)\s+(\S+)\s*(?:"([^"]*)"|(.*))?\s*$', line)
+        if m:
+            add(m[1], m[2], (m[3] if m[3] is not None else (m[4] or "")).strip(), line)
+    have = {s["name"] for s in grants.secrets}
+    for rx in ENV_MISSING_RES:
+        for m in rx.finditer(text):
+            if m[1] not in have and not m[1].startswith(("SIREUM_", "PG", "REDIS_", "DATABASE_")):
+                add("secret", m[1], "the code reads this environment variable (inferred)", m[0])
+    for m in PROXY_403_RE.finditer(text):
+        # Only the line that reports the refusal, so a neighbouring line's host isn't blamed.
+        line_start = text.rfind("\n", 0, m.start()) + 1
+        line_end = text.find("\n", m.end())
+        window = text[line_start: line_end if line_end != -1 else len(text)]
+        for h in HOST_RE.findall(window):
+            h = h.lower()
+            if h != hub_host and h not in allowed_hosts and not h.endswith(("anthropic.com", "opencode.ai")):
+                add("egress", h, "blocked by the egress allowlist (inferred)", m[0])
+    granted_scopes = {s for r in grants.registries for s in (r.get("scopes") or [])}
+    for m in NPM_SCOPE_RE.finditer(text):
+        scope = m[1].lower()
+        if scope not in granted_scopes:
+            add("registry", re.sub(r"[^a-z0-9_.-]", "", scope) or "private", f"private npm scope {scope} (inferred)", m[0])
+    return list(needs.values())
+
+
+def scrub(text: str, values: list[str]) -> str:
+    for v in sorted(set(values), key=len, reverse=True):
+        text = text.replace(v, "[redacted]")
+    return text
+
+
+def prepare(manifest: dict, wt: Path, mirror: Path, job: dict, log_path: Path,
+            extra_env: dict | None = None) -> tuple[dict, str | None, str | None]:
     """Phase 3 prepare: install repo dependencies from the base_commit manifest.
 
     Returns (env for executor + tests, error_code, message). error_code is
@@ -315,7 +526,7 @@ def prepare(manifest: dict, wt: Path, mirror: Path, job: dict, log_path: Path) -
     if not steps:
         return env, None, None
 
-    full_env = clean_env(env)
+    full_env = clean_env({**env, **(extra_env or {})})
     # Worker-side cap (operator env) can only shorten the job's prepare_timeout_sec.
     limit = int(job.get("prepare_timeout_sec") or 900)
     if os.environ.get("SIREUM_PREPARE_TIMEOUT_SEC", "").isdigit():
@@ -389,6 +600,15 @@ def run_job(job_id: str) -> int:
     lock_f = open(CACHE / "locks" / f"{key}.lock", "w")
     ident = {"GIT_AUTHOR_NAME": "Sireum Agent", "GIT_AUTHOR_EMAIL": "sireum@localhost",
              "GIT_COMMITTER_NAME": "Sireum Agent", "GIT_COMMITTER_EMAIL": "sireum@localhost"}
+    # Job-private HOME (tmpfs in the container): registry config and tool state live here
+    # and are deleted with the job.
+    job_home = Path(tempfile.mkdtemp(prefix=f"sireum-home-{job_id}-"))
+    grants = Grants(lease.get("grants"), job_home)
+    services = Services(grants.services, job_home)
+    hub_host = urllib.parse.urlsplit(BRIDGE_URL).hostname or ""
+    needs: list[dict] = []
+    for e in grants.errors:
+        log(f"grant problem: {e}")
 
     def fail(code: str, message: str, status: str = "failed") -> None:
         result["status"] = status
@@ -421,12 +641,27 @@ def run_job(job_id: str) -> int:
         targets = manifest.get("test_targets") or {}
         protected = manifest.get("protected_paths") or ["tests/", ".agent/", ".github/", ".gitlab-ci.yml"]
 
-        # Prepare (deps from the manifest at base_commit), before the agent sees the tree.
-        prep_env, prep_err, prep_msg = prepare(manifest, wt, mirror, job, log_path)
+        # Throwaway services, then prepare (deps from the manifest at base_commit) with
+        # prepare-phase secrets and registry config (inject-mode tokens only here).
+        svc_env, svc_err = services.start(log_path)
+        if svc_err:
+            result["status"], result["summary"] = "blocked", svc_err
+            return 0
+        base_env = {"HOME": str(job_home), **svc_env}
+        mark = log_path.stat().st_size
+        prep_env, prep_err, prep_msg = prepare(manifest, wt, mirror, job, log_path, extra_env={
+            **base_env, **grants.registry_env(include_inject=True), **grants.secret_env("prepare")})
+        run_reg_env = grants.registry_env(include_inject=False)   # removes inject-mode credentials
         if prep_err == "blocked":
             result["status"], result["summary"] = "blocked", prep_msg
             return 0
         if prep_err:
+            with open(log_path, errors="replace") as lf:
+                lf.seek(mark)
+                needs += detect_needs(lf.read(), grants, hub_host, grants.egress)
+            if needs:
+                result["status"], result["summary"] = "blocked", prep_msg
+                return 0
             fail("prepare", prep_msg or "prepare failed")
             return 0
 
@@ -437,7 +672,12 @@ def run_job(job_id: str) -> int:
         with open(log_path, "a") as lf:
             lf.write("\n--- executor\n")
         rc, out, timed_out = run_executor(cmd, wt, int(job["timeout_sec"]),
-                                          {**ident, **prep_env, "SIREUM_TASK": job["task"]}, log_path, cancel)
+                                          {**ident, **prep_env, **base_env, **run_reg_env,
+                                           **grants.secret_env("agent"), "SIREUM_TASK": job["task"]},
+                                          log_path, cancel)
+        # The agent's explicit SIREUM-NEED lines and proxy refusals it ran into.
+        needs += [n for n in detect_needs(out, grants, hub_host, grants.egress) if n["kind"] != "secret"
+                  or "SIREUM-NEED" in n.get("evidence", "")]
         result["exit_code"] = rc
         info = parse_claude_stream(out) if executor == "claude" and not FAKE else {}
         result["summary"] = (info.get("summary") or out.strip()[-1500:] or None)
@@ -482,9 +722,11 @@ def run_job(job_id: str) -> int:
             tcmd = str(targets[target])
             result["test_result"].update(ran=True, command=tcmd)
             try:
-                tp = subprocess.run(["sh", "-c", tcmd], cwd=wt, env=clean_env(prep_env), capture_output=True,
-                                    text=True, timeout=TEST_TIMEOUT)
+                tp = subprocess.run(["sh", "-c", tcmd], cwd=wt, capture_output=True, text=True, timeout=TEST_TIMEOUT,
+                                    env=clean_env({**prep_env, **base_env, **run_reg_env, **grants.secret_env("test")}))
                 result["test_result"]["passed"] = tp.returncode == 0
+                if tp.returncode != 0:
+                    needs += detect_needs(tp.stdout[-20000:] + tp.stderr[-20000:], grants, hub_host, grants.egress)
                 with open(log_path, "a") as lf:
                     lf.write(f"\n--- test {target}: {tcmd} (rc={tp.returncode})\n"
                              f"{tp.stdout[-4000:]}{tp.stderr[-4000:]}")
@@ -506,8 +748,8 @@ def run_job(job_id: str) -> int:
         except OSError as e:
             log(f"bundle upload failed, will spool: {e}")
 
-        if result["error"] or blocked:
-            result["status"] = "blocked" if blocked and not result["error"] else "needs_review"
+        if result["error"] or blocked or needs:
+            result["status"] = "blocked" if (blocked or needs) and not result["error"] else "needs_review"
         elif result["test_result"]["passed"] and not result["tests_modified"]:
             result["status"] = "success"
         else:
@@ -520,13 +762,37 @@ def run_job(job_id: str) -> int:
         return 0
     finally:
         hb.stop.set()
+        services.stop()
         result["finished_at"] = now_iso()
+        if needs:
+            seen, uniq = set(), []
+            for n in needs:
+                if (n["kind"], n["name"]) not in seen:
+                    seen.add((n["kind"], n["name"]))
+                    uniq.append(n)
+            result["needs"] = uniq
+            if result["status"] not in ("cancelled",) and (not result["error"] or
+                                                          result["error"]["code"] in ("prepare", "executor")):
+                result["status"] = "blocked"
+                result["error"] = {"code": "needs_access", "reset_at": None,
+                                   "message": "; ".join(f"{n['kind']} {n['name']}" for n in uniq)[:500]}
+        # Never send back a granted secret or registry token.
+        vals = grants.values()
+        if vals:
+            raw = json.dumps(result)
+            raw = scrub(raw, vals + [json.dumps(v)[1:-1] for v in vals])
+            result = json.loads(raw)
+            try:
+                log_path.write_text(scrub(log_path.read_text(errors="replace"), vals))
+            except OSError:
+                pass
         post_result(result, bundle_path)
         if mirror.exists():
             git("worktree", "remove", "--force", str(wt), cwd=mirror, check=False)
             git("worktree", "prune", cwd=mirror, check=False)
             git("branch", "-D", branch, cwd=mirror, check=False)
         shutil.rmtree(wt, ignore_errors=True)
+        shutil.rmtree(job_home, ignore_errors=True)
         lock_f.close()
 
 

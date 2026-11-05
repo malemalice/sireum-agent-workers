@@ -10,7 +10,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="${WORK:-$(mktemp -d -t sireum-phase0)}"
-PORT="${PORT:-8787}"
+PORT="${PORT:-18787}"   # not 8787: a real hub on this machine may be listening there
 IMAGE="${IMAGE:-sireum-runner:base-dev}"
 SQUID_IMAGE="${SQUID_IMAGE:-ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029}"
 EXECUTOR="${EXECUTOR:-fake}"
@@ -38,8 +38,12 @@ if [[ ! -d "$WORK/host/sireum-sandbox.git" ]]; then
   mkdir -p "$seed/.agent"
   cat > "$seed/.agent/tools.yaml" <<'EOF'
 version: 1
+services: [postgres, redis]
 test_targets:
-  smoke: test -n "$(git diff --name-only HEAD~1 HEAD)"
+  smoke: >-
+    test -n "$(git diff --name-only HEAD~1 HEAD)"
+    && psql "$DATABASE_URL" -tAc "select 1" | grep -qx 1
+    && redis-cli -u "$REDIS_URL" ping | grep -qx PONG
 protected_paths: [tests/, .agent/]
 EOF
   echo "# sandbox" > "$seed/README.md"
@@ -55,7 +59,10 @@ repos:
   - {alias: sandbox, git_host: local-sandbox, path: sireum-sandbox, default_branch: main, enabled: true}
 EOF
 
-# 2. Bridge stub on the host.
+# 2. Bridge stub on the host (refuse to run if something already listens on the port).
+if curl -s -m 2 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
+  echo "port $PORT is already in use (a real hub?) — set PORT=<free port>" >&2; exit 1
+fi
 WORKER_TOKEN=$WORKER_TOKEN OPERATOR_TOKEN=$OPERATOR_TOKEN BRIDGE_PUBLIC_URL="http://$HUB_HOST:$PORT" \
 PYTHONPATH="$ROOT/bridge" python3 -m sireum_bridge --config "$WORK/config" --state "$WORK/state" \
   --listen "127.0.0.1:$PORT" >"$WORK/bridge.log" 2>&1 &
@@ -67,8 +74,10 @@ echo "== bridge up (pid $BRIDGE_PID)"
 docker network inspect sireum-jobs >/dev/null 2>&1 || docker network create --internal sireum-jobs >/dev/null
 sed "s/sireum-hub\.<tailnet>\.ts\.net/$HUB_HOST/" "$ROOT/nomad/egress/squid.conf" > "$WORK/squid.conf"
 docker rm -f sireum-egress >/dev/null 2>&1 || true
+printf '.example.org\n' > "$WORK/egress-extra.txt"   # stands in for a per-repo approved host
 docker run -d --name sireum-egress --network bridge \
-  -v "$WORK/squid.conf:/etc/squid/squid.conf:ro" "$SQUID_IMAGE" >/dev/null
+  -v "$WORK/squid.conf:/etc/squid/squid.conf:ro" \
+  -v "$WORK/egress-extra.txt:/etc/squid/egress-extra.txt:ro" "$SQUID_IMAGE" >/dev/null
 docker network connect --alias egress sireum-jobs sireum-egress
 for _ in $(seq 30); do docker exec sireum-egress squid -k check >/dev/null 2>&1 && break; sleep 0.5; done
 sleep 1
@@ -103,7 +112,8 @@ echo "== checks"
 run=$(curl -sf "http://127.0.0.1:$PORT/v1/runs/$JOB_ID" -H "Authorization: Bearer $OPERATOR_TOKEN")
 echo "$run" > "$WORK/run.json"
 status=$(echo "$run" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["status"])')
-[[ "$status" == success ]] && ok "result status=success" || bad "result status=$status (see $WORK/run.json)"
+[[ "$status" == success ]] && ok "result status=success (tests incl. throwaway postgres + redis)" \
+  || bad "result status=$status (see $WORK/run.json)"
 if git -C "$WORK/host/sireum-sandbox.git" rev-parse -q --verify "refs/heads/agent/$JOB_ID" >/dev/null; then
   ok "branch agent/$JOB_ID pushed to the git host by the hub"
 else bad "branch agent/$JOB_ID missing on the git host"; fi
@@ -124,6 +134,7 @@ if docker run --rm --entrypoint sh "$IMAGE" -c 'command -v curl' >/dev/null 2>&1
   probe ok      "model endpoint via proxy"     -x "$proxy" https://api.anthropic.com/
   probe blocked "github.com via proxy"         -x "$proxy" https://github.com/
   probe blocked "example.com via proxy"        -x "$proxy" https://example.com/
+  probe ok      "approved extra host via proxy" -x "$proxy" https://example.org/
   probe blocked "LAN 192.168.1.1 via proxy"    -x "$proxy" http://192.168.1.1/
   probe blocked "tailnet 100.100.100.100"      -x "$proxy" http://100.100.100.100/
   probe blocked "direct internet (no proxy)"   --noproxy '*' https://example.com/

@@ -67,6 +67,12 @@ class Repo:
     api_key_cmd: list | str | None = None
     github_app: dict | None = None
     cache_sec: int | None = None
+    # Phase 6 approvals (see access.py): what jobs on this repo may receive.
+    registries: list = field(default_factory=list)
+    secrets: dict = field(default_factory=dict)       # NAME -> {source..., expose}
+    egress: list = field(default_factory=list)
+    signing: str = "merge"                             # merge | hub-ssh
+    signing_key: str | None = None                     # hub-ssh: private key path
 
     @property
     def auth(self) -> dict:
@@ -139,6 +145,10 @@ class Relay:
                 return p.stdout.decode().strip()
         raise RelayError(f"cannot resolve ref {ref!r}", 400)
 
+    def read_file(self, repo: Repo, commit: str, path: str) -> str | None:
+        p = git("show", f"{commit}:{path}", cwd=self.mirror_path(repo), check=False)
+        return p.stdout.decode(errors="replace") if p.returncode == 0 else None
+
     def intake(self, repo: Repo, job_id: str, base_commit: str, bundle: bytes) -> str:
         """Verify an uploaded bundle and store it as refs/sireum/incoming/<job_id>.
 
@@ -165,11 +175,42 @@ class Relay:
             raise RelayError("bundle tip does not descend from base_commit")
         return tip
 
-    def push(self, repo: Repo, job_id: str) -> str:
+    def sign(self, repo: Repo, job_id: str, base_commit: str) -> str:
+        """Re-create the agent's commits signed with the hub's SSH key (signing: hub-ssh).
+
+        Commit ids change; content, messages and authors are kept. The committer becomes
+        the hub identity. Returns the new tip.
+        """
+        key = repo.signing_key
+        if not key or not Path(key).exists():
+            raise RelayError(f"signing key for {repo.alias} missing: {key}", 500)
+        import shutil
+        import tempfile
+        mirror = self.mirror_path(repo)
+        incoming = f"refs/sireum/incoming/{job_id}"
+        wt = Path(tempfile.mkdtemp(prefix=f"sireum-sign-{job_id}-"))
+        shutil.rmtree(wt)
+        env = {"GIT_COMMITTER_NAME": os.environ.get("SIREUM_COMMITTER_NAME", "Sireum Hub"),
+               "GIT_COMMITTER_EMAIL": os.environ.get("SIREUM_COMMITTER_EMAIL", "sireum@localhost")}
+        try:
+            git("worktree", "add", "--quiet", "--detach", str(wt), incoming, cwd=mirror)
+            git("-c", "gpg.format=ssh", "-c", f"user.signingkey={key}", "-c", "commit.gpgsign=true",
+                "rebase", "--quiet", "--force-rebase", "--gpg-sign", "--committer-date-is-author-date",
+                base_commit, cwd=wt, env=env)
+            tip = git("rev-parse", "HEAD", cwd=wt).stdout.decode().strip()
+            git("update-ref", incoming, tip, cwd=mirror)
+            return tip
+        finally:
+            git("worktree", "remove", "--force", str(wt), cwd=mirror, check=False)
+            git("worktree", "prune", cwd=mirror, check=False)
+
+    def push(self, repo: Repo, job_id: str, base_commit: str | None = None) -> str:
         """Push the accepted bundle to the host as agent/<job_id>. Never forces."""
         branch = f"agent/{job_id}"
         if branch == repo.default_branch or not branch.startswith("agent/"):
             raise RelayError("refusing to push default branch", 403)
+        if repo.signing == "hub-ssh" and base_commit:
+            self.sign(repo, job_id, base_commit)
         host = self.hosts[repo.git_host]
         mirror = self.mirror_path(repo)
         p = git("push", "--quiet", "--porcelain", host.remote_url(repo.path),

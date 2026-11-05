@@ -191,7 +191,10 @@ systemctl enable --now nomad
 install -m 0755 "$HERE/sireum" /usr/local/bin/sireum
 printf '%s\n' "$RUNNER_IMAGE" > /etc/sireum/runner_image
 install -m 0755 "$ROOT/hub/sireum-disk-alert.sh" /usr/local/bin/sireum-disk-alert
-echo '*/15 * * * * root /usr/local/bin/sireum-disk-alert /srv/sireum/cache' > /etc/cron.d/sireum-worker
+cat > /etc/cron.d/sireum-worker <<'CRON'
+*/15 * * * * root /usr/local/bin/sireum-disk-alert /srv/sireum/cache
+*/5 * * * *  root /usr/local/bin/sireum sync-egress >/dev/null 2>&1
+CRON
 
 # 9. Self-check
 say "Checking"

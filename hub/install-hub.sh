@@ -57,6 +57,8 @@ rsync -a --delete --exclude .git "$SRC/" /opt/sireum/src/
 for f in git_hosts.yaml repos.yaml; do
   [[ -f /srv/sireum/bridge/$f ]] || install -m 0644 "/opt/sireum/src/bridge/config.example/$f" /srv/sireum/bridge/$f
 done
+# The bridge edits repos.yaml when you grant access, so it owns its config directory.
+chown -R sireum:sireum /srv/sireum/bridge
 
 say "Nomad server"
 install -m 0644 /opt/sireum/src/hub/nomad-server.hcl /etc/nomad.d/nomad.hcl
