@@ -58,7 +58,14 @@ if ! command -v tailscale >/dev/null; then
   systemctl enable --now tailscaled
 fi
 say "Joining the Sireum tailnet"
-tailscale up --auth-key="$TS_KEY" --advertise-tags=tag:sireum-worker --hostname="sireum-$(hostname -s)"
+if tailscale status >/dev/null 2>&1; then
+  echo "Already on a tailnet: $(tailscale status --json | jq -r '.Self.DNSName')"
+elif [[ -n "$TS_KEY" ]]; then
+  tailscale up --auth-key="$TS_KEY" --advertise-tags=tag:sireum-worker --hostname="sireum-$(hostname -s)"
+else
+  echo "Open the link below and log in to the same Tailscale account as the hub:"
+  tailscale up --hostname="sireum-$(hostname -s)"
+fi
 
 # 4. Enroll with the hub → node name, Nomad settings, image digests
 say "Registering this PC with the hub"
@@ -154,6 +161,21 @@ printf '%s\n' "$HUB_URL" > /etc/sireum/hub_url
 printf '%s\n' "$NODE_NAME" > /etc/sireum/node_name
 printf '%s\n' "$NODE_SECRET" > /etc/sireum/node_secret
 umask 022
+
+# Runner image: built here from the hub's own source when the hub uses a local tag
+# (no registry), so the tag always matches the Nomad job on the hub.
+if [[ "$RUNNER_IMAGE" == sireum-runner:local-* ]]; then
+  if docker image inspect "$RUNNER_IMAGE" >/dev/null 2>&1; then
+    echo "Runner image $RUNNER_IMAGE already present"
+  else
+    say "Building the runner image $RUNNER_IMAGE (a few minutes, once)"
+    BUILD_DIR="$(mktemp -d)"
+    curl -fsS "$HUB_URL/v1/nodes/$NODE_NAME/runner.tgz" -H "Authorization: Bearer $NODE_SECRET" \
+      | tar -xzf - -C "$BUILD_DIR" || fail "Could not download the runner source from the hub"
+    docker build -q -t "$RUNNER_IMAGE" "$BUILD_DIR" >/dev/null || fail "Runner image build failed"
+    rm -rf "$BUILD_DIR"
+  fi
+fi
 
 # 6. Network, egress proxy, cache
 say "Setting up the sandbox network and egress proxy"

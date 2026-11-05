@@ -23,6 +23,7 @@ from pathlib import Path
 import yaml
 
 from .apis import APIError, Nomad, Tailscale
+from . import runnersrc
 from .booster import Booster
 from .creds import Resolver
 from .nodes import Nodes
@@ -107,7 +108,8 @@ class Bridge:
             "nomad_servers": [x.strip().strip('"\'') for x in servers.strip("[] ").split(",")
                               if x.strip().strip('"\'')],
             "nomad_version": env.get("NOMAD_VERSION", ""),
-            "runner_image": env.get("RUNNER_IMAGE", ""),
+            # Empty RUNNER_IMAGE ⇒ workers build sireum-runner:local-<hash> from the hub's source.
+            "runner_image": env.get("RUNNER_IMAGE") or runnersrc.local_tag(),
             "squid_image": env.get("SQUID_IMAGE", ""),
             "registry": env.get("REGISTRY", ""),
             "registry_auth": ({"server": env.get("REGISTRY_SERVER") or "ghcr.io",
@@ -496,6 +498,21 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(200, {"lease_id": m[1], "live": b.store.is_live(lease),
                                      "current": b.store.is_current(lease)})
                 return
+            if m := re.fullmatch(r"/v1/nodes/([a-z0-9-]+)/runner(\.tgz)?", path):
+                if not b.nodes.auth_node(m[1], self._token()):
+                    return self._send(401, {"error": "unauthorized"})
+                if m[2]:
+                    data = runnersrc.tarball()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/gzip")
+                    self.send_header("X-Sireum-Runner-Image", b.nodes.settings["runner_image"])
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+                return self._send(200, {"image": b.nodes.settings["runner_image"],
+                                        "build_from_source": b.nodes.settings["runner_image"].startswith(
+                                            "sireum-runner:local-")})
             if m := re.fullmatch(r"/v1/runs/([^/]+)", path):
                 if self._authz(b.operator_token):
                     view = b.run_view(m[1])

@@ -59,7 +59,11 @@ case "$cmd" in
     curl -fsS -m 5 "$HUB_URL/healthz" >/dev/null 2>&1 && ok "Hub reachable" || bad "Hub not reachable ($HUB_URL)"
     [[ "$(docker network inspect sireum-jobs --format '{{.Internal}}' 2>/dev/null)" == "true" ]] \
       && ok "Sandbox network is closed" || bad "Sandbox network missing or not internal"
-    docker image inspect "$RUNNER_IMAGE" >/dev/null 2>&1 && ok "Runner image present" || bad "Runner image missing ($RUNNER_IMAGE)"
+    docker image inspect "$RUNNER_IMAGE" >/dev/null 2>&1 && ok "Runner image present" || bad "Runner image missing ($RUNNER_IMAGE): sireum rebuild"
+    WANT="$(curl -fsS -m 5 "$HUB_URL/v1/nodes/$NODE_NAME/runner" -H "Authorization: Bearer $NODE_SECRET" 2>/dev/null | jq -r .image 2>/dev/null)"
+    if [[ -n "$WANT" && "$WANT" != null ]]; then
+      [[ "$WANT" == "$RUNNER_IMAGE" ]] && ok "Runner image matches the hub" || bad "Hub expects $WANT: sireum rebuild"
+    fi
     probe direct https://example.com && bad "Jobs can reach the internet directly" || ok "No direct internet from jobs"
     probe proxy https://github.com && bad "Jobs can reach git hosts" || ok "Git hosts blocked for jobs"
     probe proxy http://192.168.1.1 && bad "Jobs can reach the LAN" || ok "LAN blocked for jobs"
@@ -84,6 +88,27 @@ case "$cmd" in
     journalctl -u nomad -n "${1:-100}" --no-pager
     ;;
 
+  rebuild)
+    # Build the runner image the hub currently expects (after the hub was updated).
+    WANT="$(curl -fsS "$HUB_URL/v1/nodes/$NODE_NAME/runner" -H "Authorization: Bearer $NODE_SECRET" | jq -r .image)" \
+      || { echo "Hub not reachable"; exit 1; }
+    if [[ "$WANT" != sireum-runner:local-* ]]; then
+      docker pull "$WANT"
+    elif docker image inspect "$WANT" >/dev/null 2>&1; then
+      echo "Up to date: $WANT"
+    else
+      echo "Building $WANT …"
+      D="$(mktemp -d)"
+      curl -fsS "$HUB_URL/v1/nodes/$NODE_NAME/runner.tgz" -H "Authorization: Bearer $NODE_SECRET" | tar -xzf - -C "$D"
+      docker build -q -t "$WANT" "$D" >/dev/null && echo "Built $WANT"
+      rm -rf "$D"
+    fi
+    printf '%s\n' "$WANT" > /etc/sireum/runner_image
+    # Drop older local runner images.
+    docker images --format '{{.Repository}}:{{.Tag}}' | grep '^sireum-runner:local-' | grep -vx "$WANT" \
+      | xargs -r docker rmi >/dev/null 2>&1 || true
+    ;;
+
   *)
     cat <<'EOF'
 sireum — worker helper
@@ -94,6 +119,7 @@ sireum — worker helper
   sireum seats     register Claude / OpenCode tokens with the hub
   sireum check     run the self-check
   sireum logs [n]  show the last n Nomad log lines
+  sireum rebuild   build/pull the runner image the hub expects (after hub updates)
   sireum leave     remove this PC from Sireum
 EOF
     ;;

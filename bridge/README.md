@@ -14,7 +14,10 @@
 | `sources.py` | `kanban-ssh` (Hermes via `sireum-kanban`), `github` (Issues), `file` (tests); card parser |
 | `nodes.py` | Join codes, enroll, seats (Nomad Variables, or 0600 file without Nomad), leave |
 | `apis.py` | Nomad + Tailscale HTTP clients |
-| `cli.py` | `sireum-hub serve | invite [--name] [--ts-auth-key] [--revoke] | nodes` |
+| `cli.py` | `sireum-hub serve | invite | nodes | add-repo | repos | connect-hermes | runner-image` |
+| `admin.py` | Config-editing commands (`add-repo`, `connect-hermes`), env-file updates, bridge restart |
+| `creds.py` | Credential sources: file / env / command / GitHub App, cached, hot-reloaded |
+| `runnersrc.py` | Runner image tag from source hash; source tarball for workers to build |
 
 Extra env beyond the table below: `SOURCE` (`kanban-ssh:user@host#keyfile`,
 `github:owner/repo#tokenfile`, `file:path`), `NOMAD_SERVERS`, `NOMAD_VERSION`,

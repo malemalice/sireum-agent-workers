@@ -1,13 +1,10 @@
-# Only enabled repos are dispatched. Enable a repo only after its default branch
-# is protected on the host and the host key can push branches and open MRs.
-repos:
-  - alias: sandbox
-    git_host: local-sandbox
-    path: sireum-sandbox
-    default_branch: main
-    enabled: true
-  - alias: example
-    git_host: github-adaptiv
-    path: adaptiv/example
-    default_branch: main
-    enabled: false
+# Repos Sireum may work on. Usually written by `sireum-hub add-repo`; applied without a restart.
+# Enable a repo only once its default branch is protected.
+repos: []
+# Example:
+# repos:
+#   - alias: example            # cards use the label repo:example
+#     git_host: github
+#     path: adaptiv/example
+#     default_branch: main
+#     enabled: true

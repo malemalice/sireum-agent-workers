@@ -44,7 +44,13 @@ install -d -o 10001 -g 10001 -m 0750 \
   "$CACHE_DIR" "$CACHE_DIR/mirrors" "$CACHE_DIR/work" "$CACHE_DIR/toolchains" \
   "$CACHE_DIR/results" "$CACHE_DIR/locks" "$CACHE_DIR/logs"
 
-# 4. Pre-pull the runner image (multi-arch index resolves to this env's arch).
-docker pull "$RUNNER_IMAGE"
+# 4. Runner image: locally built tags (sireum-runner:local-*) come from install-env.sh /
+#    `sireum rebuild`; registry images are pre-pulled (multi-arch index → this arch).
+if ! docker image inspect "$RUNNER_IMAGE" >/dev/null 2>&1; then
+  case "$RUNNER_IMAGE" in
+    sireum-runner:local-*) echo "WARNING: $RUNNER_IMAGE not built yet; run: sireum rebuild" >&2 ;;
+    *) docker pull "$RUNNER_IMAGE" ;;
+  esac
+fi
 
 echo "Bootstrap done. Next: client.hcl with meta host_os=${HOST_OS}, start nomad, store this node's seat tokens on the hub."

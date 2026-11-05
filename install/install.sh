@@ -10,7 +10,7 @@
 set -euo pipefail
 
 JOIN_CODE="${1:-}"
-REPO_TARBALL="${SIREUM_TARBALL:-https://github.com/malemalice/sireum-agent-workers/archive/refs/heads/main.tar.gz}"
+[[ -f "$(cd "$(dirname "$0")" && pwd)/install-env.sh" ]] || { echo "Run this from a Sireum checkout (install/install.sh)" >&2; exit 1; }
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
@@ -54,9 +54,10 @@ EOF
     launchctl load "$PLIST"
 
     say "Installing Sireum inside the VM"
-    limactl shell sireum -- bash -lc "curl -fsSL '$REPO_TARBALL' -o /tmp/sireum.tgz && \
-      mkdir -p /tmp/sireum && tar -xzf /tmp/sireum.tgz -C /tmp/sireum --strip-components=1 && \
-      sudo SIREUM_HOST_OS=macos bash /tmp/sireum/install/install-env.sh '$JOIN_CODE'"
+    # Copy this checkout into the VM (the repo may sit in a protected folder like ~/Documents).
+    tar -C "$HERE/.." --exclude .git --exclude __pycache__ -czf - . \
+      | limactl shell --workdir / sireum -- bash -c 'rm -rf /tmp/sireum && mkdir -p /tmp/sireum && tar -xzf - -C /tmp/sireum'
+    limactl shell --workdir / sireum -- sudo SIREUM_HOST_OS=macos bash /tmp/sireum/install/install-env.sh "$JOIN_CODE"
 
     say "Installing the 'sireum' command on this Mac"
     # BSD install(1) on macOS can't read a pipe; stage via a file.
@@ -84,13 +85,7 @@ EOF
 
   Linux)
     say "Linux detected — installing directly on this machine"
-    if [[ -f "$HERE/install-env.sh" ]]; then
-      sudo SIREUM_HOST_OS=linux bash "$HERE/install-env.sh" "$JOIN_CODE"
-    else
-      curl -fsSL "$REPO_TARBALL" -o /tmp/sireum.tgz
-      mkdir -p /tmp/sireum && tar -xzf /tmp/sireum.tgz -C /tmp/sireum --strip-components=1
-      sudo SIREUM_HOST_OS=linux bash /tmp/sireum/install/install-env.sh "$JOIN_CODE"
-    fi
+    sudo SIREUM_HOST_OS=linux bash "$HERE/install-env.sh" "$JOIN_CODE"
     echo
     echo "Next: create a Claude token on a machine with a browser (claude setup-token),"
     echo "then register it here with:  sudo sireum seats"

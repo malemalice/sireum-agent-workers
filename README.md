@@ -315,9 +315,17 @@ server, `sireum-bridge` with the git relay, and an image registry, all reachable
 only over Tailscale. On an Ubuntu/Debian PC that is already on the tailnet:
 
 ```bash
-sudo ./hub/install-hub.sh          # Nomad server + ACLs, registry, bridge, crons
-REGISTRY=<hub>.ts.net:5000 scripts/build-images.sh   # push the runner images
+sudo ./hub/install-hub.sh          # Linux hub: Nomad server + ACLs, bridge, crons
+./hub/install-hub-macos.sh         # or a macOS hub (native, no VM)
+
+sireum-hub add-repo owner/repo                          # per repo; reuses your gh login
+sireum-hub connect-hermes you@hermes-host --taggers a,b # once; installs sireum-kanban there
+sireum-hub invite --name <pc>                           # per worker PC
 ```
+
+No image registry is needed: each worker builds the runner image from the hub's source
+(tag `sireum-runner:local-<hash>`), and `sireum rebuild` on a worker catches up after a hub
+update.
 
 **Hub on a Mac:** run `./hub/install-hub-macos.sh` as your user (it asks for sudo when
 needed). It runs natively — no VM, no Docker: Nomad server (pinned binary), the bridge in a
@@ -335,8 +343,8 @@ To invite a PC:
 sireum-hub invite            # prints a one-time join code (24 h)
 ```
 
-Send the code privately. The hub creates a single-use, tagged Tailscale key for
-it.
+Send the code privately. If a Tailscale OAuth client is configured, the code carries a
+single-use tagged key; otherwise the worker installer shows a Tailscale login link.
 
 Two config files on the hub decide what Sireum may touch:
 

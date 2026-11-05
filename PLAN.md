@@ -220,6 +220,7 @@ git host; nothing has run on real hardware yet.
 | `sireum-kanban` forced command | ✓ | against a fake `hermes` CLI | **match the command templates to the real CLI** |
 | Enrollment: `sireum-hub invite`, enroll / seats / leave | ✓ | tests (no Tailscale/Nomad) | Tailscale OAuth key minting, Nomad Variables |
 | Hub installer (`hub/install-hub.sh`), Nomad server + ACL policies, crons | ✓ | syntax only | run on the hub PC |
+| Phase 1.5: add-repo, connect-hermes, worker-built image, invites without Tailscale OAuth | ✓ | 10 tests (fake GitHub API, dry-run SSH) | real GitHub, hermes-host, a worker build |
 | Native macOS hub (`hub/install-hub-macos.sh`) + GHCR pull auth | ✓ | bash 3.2 syntax, launchd plists lint, bridge + enrol on macOS Python 3.9, 27 tests on 3.9 and 3.13 | run on the hub Mac; GHCR package + tokens |
 | Worker installers (`install/`) | updated | syntax only | MBP (Lima), one Windows PC |
 | Prepare step + `:browser` image (Phase 3) | ✓ | 4 prepare tests | build `:browser` (skipped here: low disk) |
@@ -268,7 +269,7 @@ git host; nothing has run on real hardware yet.
 ### Phase 4 — more sources and hosts
 - Notion/Jira/GitHub Issues adapters; more git host adapters (Gitea, generic push-only).
 
-### Phase 1.5 — simplified operator setup (in progress)
+### Phase 1.5 — simplified operator setup (built 2026-11-05)
 Goal: after the hub install, the operator's only manual work is the Claude Code /
 OpenCode seat tokens on each worker.
 - No registry: the hub serves the runner source; each worker builds the image whose tag
@@ -282,8 +283,12 @@ OpenCode seat tokens on each worker.
 - `sireum-hub connect-hermes user@hermes-host --taggers …`: installs `sireum-kanban` over
   SSH, accepts the host key, sets `SOURCE` / `REMOTE_TAGGERS`, restarts the bridge.
 - Deferred (optional): Tailscale ACL, `OFFSITE` backups.
-- Built so far (uncommitted): credential resolver (`bridge/sireum_bridge/creds.py`) and
-  config hot-reload.
+- Built: `runnersrc.py` (content-hash tag + `/v1/nodes/<n>/runner[.tgz]`), `admin.py`
+  (`add-repo`, `repos`, `connect-hermes`, `runner-image`), `sireum rebuild`, invites
+  without a Tailscale key, installers copying the local checkout, Linux registry optional
+  (`USE_REGISTRY=1`). Tests: `tests/test_phase15.py` (10).
+- Not verified on real systems: `add-repo` against github.com, `connect-hermes` against
+  hermes-host, a worker building the image inside Lima/WSL2.
 
 ### Phase 6 — credentials, packages, secrets, access requests
 Principle (industry practice): short-lived, least-privilege credentials held by the hub;

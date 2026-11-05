@@ -2,7 +2,7 @@
 # Install sireum-kanban on hermes-host. Adds a user and one authorized_keys line; no service.
 #   sudo ./install-on-hermes-host.sh "<sireum-hub public key line>"
 set -euo pipefail
-PUB="${1:?pass the hub's public key (contents of /srv/sireum/secrets/kanban_ed25519.pub)}"
+PUB="${1:?pass the hub public key (contents of /srv/sireum/secrets/kanban_ed25519.pub)}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 id sireum >/dev/null 2>&1 || useradd --create-home --shell /bin/bash sireum
 install -m 0755 "$HERE/sireum-kanban" /usr/local/bin/sireum-kanban

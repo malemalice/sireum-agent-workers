@@ -8,7 +8,6 @@
 # command for Windows.
 param([Parameter(Mandatory = $true)][string]$JoinCode)
 $ErrorActionPreference = "Stop"
-$Tarball = "https://github.com/malemalice/sireum-agent-workers/archive/refs/heads/main.tar.gz"
 $Distro  = "sireum"
 
 function Say($m)  { Write-Host "`n==> $m" -ForegroundColor Cyan }
@@ -53,7 +52,10 @@ wsl --terminate $Distro
 
 # 5. Install Sireum inside the distro
 Say "Installing Sireum inside WSL"
-wsl -d $Distro -u root -- bash -lc "curl -fsSL '$Tarball' -o /tmp/sireum.tgz && mkdir -p /tmp/sireum && tar -xzf /tmp/sireum.tgz -C /tmp/sireum --strip-components=1 && SIREUM_HOST_OS=windows bash /tmp/sireum/install/install-env.sh '$JoinCode'"
+# Copy this checkout into the distro (no download needed).
+$RepoWin = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$RepoWsl = (wsl -d $Distro -u root -- wslpath -a "$RepoWin").Trim()
+wsl -d $Distro -u root -- bash -lc "rm -rf /tmp/sireum && mkdir -p /tmp/sireum && cp -a '$RepoWsl/.' /tmp/sireum/ && rm -rf /tmp/sireum/.git && SIREUM_HOST_OS=windows bash /tmp/sireum/install/install-env.sh '$JoinCode'"
 if ($LASTEXITCODE -ne 0) { Fail "Install inside WSL failed; see the messages above." }
 
 # 6. Keep it running after logon

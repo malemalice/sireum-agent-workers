@@ -71,9 +71,13 @@ export NOMAD_TOKEN="$(cat $SECRETS/nomad-mgmt.token)"
 nomad acl policy apply -description "sireum-bridge" sireum-bridge /opt/sireum/src/hub/policies/sireum-bridge.hcl
 nomad acl policy apply -description "worker sireum helper" sireum-worker-node /opt/sireum/src/hub/policies/sireum-worker-node.hcl
 
-say "Registry (tailnet only, $TS_IP:5000)"
-docker inspect sireum-registry >/dev/null 2>&1 || docker run -d --restart unless-stopped --name sireum-registry \
-  -p "$TS_IP:5000:5000" -v /srv/sireum/registry:/var/lib/registry "$REGISTRY_IMAGE" >/dev/null
+# Optional own registry (USE_REGISTRY=1). Default: none — workers build the runner image
+# from this hub's source (tag sireum-runner:local-<hash>).
+if [[ -n "${USE_REGISTRY:-}" ]]; then
+  say "Registry (tailnet only, $TS_IP:5000)"
+  docker inspect sireum-registry >/dev/null 2>&1 || docker run -d --restart unless-stopped --name sireum-registry \
+    -p "$TS_IP:5000:5000" -v /srv/sireum/registry:/var/lib/registry "$REGISTRY_IMAGE" >/dev/null
+fi
 
 say "Bridge config"
 gen() { python3 -c 'import secrets; print(secrets.token_urlsafe(32))'; }
@@ -89,6 +93,8 @@ if [[ ! -f $ENV_FILE ]]; then
       -e "s#^NOMAD_NODE_TOKEN=.*#NOMAD_NODE_TOKEN=$NODE_TOKEN#" \
       -e "s#^NOMAD_VERSION=.*#NOMAD_VERSION=$NOMAD_VERSION#" \
       -e "s#^SQUID_IMAGE=.*#SQUID_IMAGE=$SQUID_IMAGE#" \
+      -e "s#^REGISTRY=.*#REGISTRY=${USE_REGISTRY:+$TS_NAME:5000}#" \
+      -e "s#^RUNNER_IMAGE=.*#RUNNER_IMAGE=${USE_REGISTRY:+$TS_NAME:5000/sireum-runner:base}#" \
       /opt/sireum/src/hub/bridge.env.example > $ENV_FILE
   chown sireum:sireum $ENV_FILE; chmod 0600 $ENV_FILE
 fi
@@ -98,8 +104,10 @@ set -a; . $ENV_FILE; set +a
 
 say "Runner job"
 nomad var put -force nomad/jobs/sireum-runner worker_token="$WORKER_TOKEN" >/dev/null
+JOB_IMAGE="${RUNNER_IMAGE:-$(PYTHONPATH=/opt/sireum/src/bridge /opt/sireum/venv/bin/python -c \
+  'from sireum_bridge import runnersrc; print(runnersrc.local_tag())')}"
 sed -e "s#https://sireum-hub.<tailnet>.ts.net#$HUB_URL#" \
-    -e "s#sireum-hub.<tailnet>.ts.net:5000/sireum-runner@sha256:<multi-arch-index-digest>#$RUNNER_IMAGE#" \
+    -e "s#sireum-hub.<tailnet>.ts.net:5000/sireum-runner@sha256:<multi-arch-index-digest>#$JOB_IMAGE#" \
     /opt/sireum/src/nomad/sireum-runner.nomad.hcl > /srv/sireum/sireum-runner.nomad.hcl
 nomad job run -detach /srv/sireum/sireum-runner.nomad.hcl >/dev/null
 
@@ -123,32 +131,21 @@ curl -fs http://127.0.0.1:8787/healthz >/dev/null && echo "bridge: healthy" || e
 cat <<EOF
 
 Hub is up: $HUB_URL
-
-Remaining steps (manual):
- 1. Build + push the runner image from any PC on the tailnet with Docker buildx:
-      REGISTRY=$TS_NAME:5000 scripts/build-images.sh
-    (registry is plain HTTP over the tailnet: add "$TS_NAME:5000" to insecure-registries
-     in the build machine's Docker daemon config.)
- 2. Git hosts: put each API key in $SECRETS/<id>.key (0600, owner sireum), edit
-    /srv/sireum/bridge/git_hosts.yaml and repos.yaml, then: systemctl restart sireum-bridge
- 3. Kanban: on hermes-host run kanban/install-on-hermes-host.sh with this public key:
-      $(cat $SECRETS/kanban_ed25519.pub)
-    then set SOURCE and REMOTE_TAGGERS in $ENV_FILE, and accept the host key:
-      sudo -u sireum ssh -i $SECRETS/kanban_ed25519 sireum@<hermes-host> list-remote
- 4. Join codes: set TS_OAUTH_CLIENT_ID/SECRET in $ENV_FILE (or pass --ts-auth-key), then
-      sudo -u sireum env \$(sudo cat $ENV_FILE | xargs) /opt/sireum/venv/bin/python -m sireum_bridge \\
-        --state /srv/sireum/state invite --name <pc>
-    (wrapper: /usr/local/bin/sireum-hub)
- 5. Tailscale ACL: tag:sireum-worker -> $TS_NAME:443,4647,5000 only.
- 6. Off-host backups: set OFFSITE=... in $ENV_FILE.
+Next:
+  sudo sireum-hub add-repo owner/repo                          # per repo (uses your gh login)
+  sudo sireum-hub connect-hermes you@hermes-host --taggers a,b # once
+  sudo sireum-hub invite --name <pc>                           # per worker PC
+Optional, later: Tailscale ACL (tag:sireum-worker -> $TS_NAME:443,4647), OFFSITE backups in $ENV_FILE.
 Operator token for /status and /v1/dispatch: grep OPERATOR_TOKEN $ENV_FILE
 EOF
 
 cat > /usr/local/bin/sireum-hub <<EOF
 #!/usr/bin/env bash
-# Operator CLI on the hub: sireum-hub invite [--name PC] | invite --revoke | nodes
+# Operator CLI on the hub (run with sudo): sireum-hub --help
+[[ \$EUID -eq 0 ]] || exec sudo "\$0" "\$@"
 set -a; . $ENV_FILE; set +a
-cd /opt/sireum/src/bridge && exec sudo -E -u sireum PYTHONPATH=/opt/sireum/src/bridge \\
-  /opt/sireum/venv/bin/python -m sireum_bridge --state /srv/sireum/state "\$@"
+export PYTHONPATH=/opt/sireum/src/bridge SIREUM_CONFIG=/srv/sireum/bridge SIREUM_ENV_FILE=$ENV_FILE \\
+  SIREUM_SRC=/opt/sireum/src SIREUM_SERVICE_USER=sireum
+cd /opt/sireum/src/bridge && exec /opt/sireum/venv/bin/python -m sireum_bridge --state /srv/sireum/state "\$@"
 EOF
 chmod 0755 /usr/local/bin/sireum-hub

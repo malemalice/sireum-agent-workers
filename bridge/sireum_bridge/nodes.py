@@ -50,16 +50,15 @@ class Nodes:
     def invite(self, name: str | None = None, ts_auth_key: str | None = None, ttl: int = 86400) -> str:
         token = secrets.token_urlsafe(32)
         key_id = None
-        if not ts_auth_key:
-            if not self.ts:
-                raise SystemExit("No Tailscale OAuth client configured (TS_OAUTH_CLIENT_ID/SECRET); "
-                                 "pass --ts-auth-key with a pre-made single-use tagged key")
+        if not ts_auth_key and self.ts:
             key_id, ts_auth_key = self.ts.create_auth_key(description=f"sireum {name or 'worker'}")
+        # No key and no OAuth client: the worker installer runs an interactive `tailscale up`
+        # and the person at the PC clicks the login link.
         expires = time.time() + ttl
         with self.store.lock:
             self.store.db.execute("INSERT INTO enroll_tokens(token_hash, name, expires_at, ts_key_id) VALUES (?,?,?,?)",
                                   (h(token), self._clean(name) if name else None, expires, key_id))
-        return encode_join({"hub": self.hub_url, "ts_auth_key": ts_auth_key, "enroll_token": token,
+        return encode_join({"hub": self.hub_url, "ts_auth_key": ts_auth_key or "", "enroll_token": token,
                             "expires": datetime.fromtimestamp(expires).astimezone().isoformat(timespec="minutes")})
 
     def revoke_invites(self) -> int:

@@ -190,14 +190,13 @@ export NOMAD_TOKEN="$(cat $SECRETS/nomad-mgmt.token)"
 
 say "Runner job"
 $NOMAD var put -force nomad/jobs/sireum-runner worker_token="$WORKER_TOKEN" >/dev/null
-if [[ -n "${RUNNER_IMAGE:-}" ]]; then
-  sed -e "s#https://sireum-hub.<tailnet>.ts.net#$HUB_URL#" \
-      -e "s#sireum-hub.<tailnet>.ts.net:5000/sireum-runner@sha256:<multi-arch-index-digest>#$RUNNER_IMAGE#" \
-      $HOME_DIR/src/nomad/sireum-runner.nomad.hcl > $HOME_DIR/sireum-runner.nomad.hcl
-  $NOMAD job run -detach $HOME_DIR/sireum-runner.nomad.hcl >/dev/null && echo "sireum-runner job registered ($RUNNER_IMAGE)"
-else
-  echo "RUNNER_IMAGE not set yet — the runner job is registered after you set it and re-run this script."
-fi
+# Empty RUNNER_IMAGE (default) ⇒ workers build sireum-runner:local-<hash> from this hub's source.
+JOB_IMAGE="${RUNNER_IMAGE:-$(PYTHONPATH=$HOME_DIR/src/bridge $HOME_DIR/venv/bin/python -c \
+  'from sireum_bridge import runnersrc; print(runnersrc.local_tag())')}"
+sed -e "s#https://sireum-hub.<tailnet>.ts.net#$HUB_URL#" \
+    -e "s#sireum-hub.<tailnet>.ts.net:5000/sireum-runner@sha256:<multi-arch-index-digest>#$JOB_IMAGE#" \
+    $HOME_DIR/src/nomad/sireum-runner.nomad.hcl > $HOME_DIR/sireum-runner.nomad.hcl
+$NOMAD job run -detach $HOME_DIR/sireum-runner.nomad.hcl >/dev/null && echo "sireum-runner job registered ($JOB_IMAGE)"
 
 say "Bridge + HTTPS + housekeeping"
 for l in id.sireum.bridge id.sireum.awake id.sireum.snapshot id.sireum.disk-alert id.sireum.git-gc; do load $l; done
@@ -209,9 +208,10 @@ EOF
 
 install_stdin /usr/local/bin/sireum-hub 0755 <<EOF
 #!/bin/bash
-# Operator CLI: sireum-hub invite [--name PC] | invite --revoke | nodes
+# Operator CLI: sireum-hub --help
 set -a; . $ENV_FILE; set +a
-export PYTHONPATH=$HOME_DIR/src/bridge
+export PYTHONPATH=$HOME_DIR/src/bridge SIREUM_CONFIG=$HOME_DIR/bridge SIREUM_ENV_FILE=$ENV_FILE SIREUM_SRC=$HOME_DIR/src
+export SIREUM_SERVICE_USER=
 exec $HOME_DIR/venv/bin/python -m sireum_bridge --state $HOME_DIR/state "\$@"
 EOF
 install_stdin /usr/local/bin/sireum-hub-uninstall 0755 <<EOF
@@ -235,22 +235,11 @@ cat <<EOF
 Hub is up natively on this Mac: $HUB_URL
 Logs: $HOME_DIR/logs/   Config: $HOME_DIR/bridge/   Secrets: $ENV_FILE
 
-Remaining steps:
- 1. Runner image on GHCR (private). From any machine with Docker buildx:
-      echo <PAT with write:packages> | docker login ghcr.io -u <user> --password-stdin
-      REGISTRY=ghcr.io/<org> scripts/build-images.sh base
-    Put the printed ghcr.io/<org>/sireum-runner@sha256:… in RUNNER_IMAGE, and a read-only
-    pull token (PAT with read:packages only) in REGISTRY_USERNAME / REGISTRY_PASSWORD
-    in $ENV_FILE, then re-run this script (registers the Nomad job).
- 2. Git hosts: key files in $SECRETS/<id>.key (chmod 600), edit $HOME_DIR/bridge/git_hosts.yaml
-    and repos.yaml, then: sudo launchctl kickstart -k system/id.sireum.bridge
- 3. Kanban: on hermes-host run kanban/install-on-hermes-host.sh "$(cat $SECRETS/kanban_ed25519.pub)"
-    then set SOURCE / REMOTE_TAGGERS in $ENV_FILE, accept the host key once:
-      ssh -i $SECRETS/kanban_ed25519 sireum@<hermes-host> list-remote
- 4. Join codes: set TS_OAUTH_CLIENT_ID/SECRET in $ENV_FILE, then: sireum-hub invite --name <pc>
- 5. Tailscale ACL: tag:sireum-worker -> $TS_NAME:443,4647 only.
- 6. Off-host backups: OFFSITE=… in $ENV_FILE.
- 7. Keep the Mac on: plugged in; optionally  sudo pmset -c sleep 0 disksleep 0; sudo pmset -a autorestart 1
-    (a laptop still sleeps with the lid closed unless an external display is attached).
+Next:
+  sireum-hub add-repo owner/repo                          # per repo (uses your gh login)
+  sireum-hub connect-hermes you@hermes-host --taggers a,b # once
+  sireum-hub invite --name <pc>                           # per worker PC
+Optional, later: Tailscale ACL (tag:sireum-worker -> $TS_NAME:443,4647), OFFSITE backups in
+$ENV_FILE, sudo pmset -c sleep 0 (keep the Mac awake on power).
 Uninstall: sireum-hub-uninstall [--purge]
 EOF
